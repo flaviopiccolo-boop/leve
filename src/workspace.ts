@@ -13,7 +13,9 @@ export const demoFiles: Record<string, string> = {
   'requirements.txt': '# Add project dependencies here.\n',
 };
 
-let demo = { ...demoFiles };
+// No prototype, so names such as "constructor" are ordinary demo files.
+const demo: Record<string, string> = Object.assign(Object.create(null), demoFiles);
+const demoFolders = new Set<string>();
 let workspaceSelected = false;
 export function sortEntries(entries: FileEntry[]) {
   return entries.sort((a, b) => Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name));
@@ -37,6 +39,11 @@ export async function listFiles(path = ''): Promise<FileEntry[]> {
     const [name, ...rest] = file.slice(prefix.length).split('/');
     entries.set(name, { name, path: prefix + name, directory: rest.length > 0 });
   }
+  for (const folder of demoFolders) {
+    if (!folder.startsWith(prefix)) continue;
+    const [name] = folder.slice(prefix.length).split('/');
+    entries.set(name, { name, path: prefix + name, directory: true });
+  }
   return sortEntries([...entries.values()]);
 }
 export async function readFile(path: string): Promise<string> {
@@ -46,6 +53,59 @@ export async function writeFile(file: OpenFile): Promise<void> {
   if (native && workspaceSelected) await invoke('write_file', { path: file.path, content: file.content, expected: file.saved });
   else demo[file.path] = file.content;
 }
+export const parentPath = (path: string) => path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+export const joinPath = (parent: string, name: string) => parent ? `${parent}/${name}` : name;
+/** The path after moving `from` to `to`, or null when `path` is unaffected. */
+export function movedPath(path: string, from: string, to: string) {
+  if (path === from) return to;
+  return path.startsWith(`${from}/`) ? to + path.slice(from.length) : null;
+}
+/** Keep this in sync with `validate_name` in `src-tauri/src/files.rs`. Returns the problem, if any. */
+export function validateName(name: string) {
+  if (!name) return 'Enter a name.';
+  if (name === '.' || name === '..') return 'This name is not allowed.';
+  if ([...name].length > 255) return 'The name is too long.';
+  // eslint-disable-next-line no-control-regex
+  if (/[<>:"/\\|?*\u0000-\u001f\u007f-\u009f]/.test(name)) return 'A name cannot contain < > : " / \\ | ? *';
+  if (/[ .]$/.test(name)) return 'A name cannot end with a space or period.';
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(name)) return 'Windows reserves this name.';
+  return '';
+}
+const demoExists = (path: string) => path in demo || demoFolders.has(path) || Object.keys(demo).some(file => file.startsWith(`${path}/`)) || [...demoFolders].some(folder => folder.startsWith(`${path}/`));
+export async function createPath(parent: string, name: string, directory: boolean): Promise<string> {
+  const path = joinPath(parent, name);
+  if (native && workspaceSelected) await invoke(directory ? 'create_directory' : 'create_file', { path });
+  else {
+    const problem = validateName(name) || (demoExists(path) ? 'A file or folder with this name already exists.' : '');
+    if (problem) throw new Error(problem);
+    if (directory) demoFolders.add(path); else demo[path] = '';
+  }
+  return path;
+}
+export async function renamePath(path: string, name: string): Promise<string> {
+  if (native && workspaceSelected) return invoke<string>('rename_path', { path, newName: name });
+  const renamed = joinPath(parentPath(path), name);
+  const problem = validateName(name) || (demoExists(renamed) ? 'A file or folder with this name already exists.' : '');
+  if (problem) throw new Error(problem);
+  for (const file of Object.keys(demo)) {
+    const moved = movedPath(file, path, renamed);
+    if (moved) { demo[moved] = demo[file]; delete demo[file]; }
+  }
+  for (const folder of [...demoFolders]) {
+    const moved = movedPath(folder, path, renamed);
+    if (moved) { demoFolders.delete(folder); demoFolders.add(moved); }
+  }
+  return renamed;
+}
+export async function deletePath(path: string): Promise<void> {
+  if (native && workspaceSelected) { await invoke('delete_path', { path }); return; }
+  for (const file of Object.keys(demo)) if (movedPath(file, path, '') !== null) delete demo[file];
+  for (const folder of [...demoFolders]) if (movedPath(folder, path, '') !== null) demoFolders.delete(folder);
+  // Demo folders exist only through their files, so keep an emptied parent visible.
+  if (parentPath(path)) demoFolders.add(parentPath(path));
+}
+/** True when deletion goes to the operating system's Recycle Bin. */
+export const usesRecycleBin = () => native && workspaceSelected;
 export function fileName(path: string) { return path.split(/[\\/]/).pop() || path; }
 export function languageName(path: string) {
   const ext = path.split('.').pop()?.toLowerCase();

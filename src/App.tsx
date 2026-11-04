@@ -1,12 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
-import { Actions, DockLocation, Layout, Model, TabNode, type Action, type IJsonModel } from 'flexlayout-react';
-import { Blocks, ChevronDown, ChevronRight, Code2, FileCode2, Files, Folder, FolderOpen, Keyboard, LayoutTemplate, Plus, RefreshCw, Search, Settings2, TerminalSquare, X } from 'lucide-react';
+import { Actions, DockLocation, Layout, Model, TabNode, TabSetNode, type Action, type IJsonModel } from 'flexlayout-react';
+import { Blocks, ChevronDown, Code2, FileCode2, Files, Folder, FolderOpen, Keyboard, LayoutTemplate, Plus, Search, Settings2, TerminalSquare, X } from 'lucide-react';
 import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import { useTheme } from './theme';
 import { loadShells, previewShells, type ShellProfile } from './shells';
 import { loadSession, restoreFiles, saveSession, type Session } from './session';
 import { loadProjects, rememberProject, sameProject } from './projects';
-import { activateWorkspace, fileName, indexFiles, languageName, listFiles, native, pickWorkspace, readFile, writeFile, type FileEntry, type OpenFile } from './workspace';
+import Explorer from './Explorer';
+import { activateWorkspace, createPath, deletePath, fileName, indexFiles, languageName, movedPath, native, pickWorkspace, readFile, renamePath, usesRecycleBin, writeFile, type FileEntry, type OpenFile } from './workspace';
 
 const LAYOUT_KEY = 'leve.layout.v1';
 const Editor = lazy(() => import('./Editor'));
@@ -47,28 +48,6 @@ function loadLayout(savedLayout?: IJsonModel, restoredFiles?: Set<string>) {
     }
   } catch { /* Fall back to the standard layout if stored data is incompatible. */ }
   return Model.fromJson(initialLayout());
-}
-
-function Tree({ path = '', depth = 0, refresh, onOpen }: { path?: string; depth?: number; refresh: number; onOpen: (path: string) => void }) {
-  const [entries, setEntries] = useState<FileEntry[]>([]);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set(['src']));
-  const [error, setError] = useState('');
-  useEffect(() => {
-    let active = true;
-    setError('');
-    void listFiles(path).then(items => { if (active) setEntries(items); }).catch(err => { if (active) setError(String(err)); });
-    return () => { active = false; };
-  }, [path, refresh]);
-  return <>{error && <p className="inline-error">{error}</p>}{entries.map(entry => <div key={entry.path}>
-    <button className="tree-item" style={{ paddingLeft: 12 + depth * 15 }} title={entry.path} aria-expanded={entry.directory ? expanded.has(entry.path) : undefined} onClick={() => {
-      if (!entry.directory) onOpen(entry.path);
-      else setExpanded(previous => { const next = new Set(previous); if (next.has(entry.path)) next.delete(entry.path); else next.add(entry.path); return next; });
-    }}>
-      {entry.directory ? <>{expanded.has(entry.path) ? <ChevronDown size={12} /> : <ChevronRight size={12} />}<Folder size={15} className="folder-icon" /></> : <><span className="tree-spacer" /><FileCode2 size={14} className={entry.name.endsWith('.py') ? 'python-icon' : 'file-icon'} /></>}
-      <span>{entry.name}</span>
-    </button>
-    {entry.directory && expanded.has(entry.path) && <Tree path={entry.path} depth={depth + 1} refresh={refresh} onOpen={onOpen} />}
-  </div>)}</>;
 }
 
 export default function App() {
@@ -207,6 +186,56 @@ export default function App() {
     finally { saving.current.delete(path); }
   }, [notify, root, recoveryBlocked]);
 
+  const confirmAction = (message: string, title: string) => native ? confirmDialog(message, { title, kind: 'warning' }) : Promise.resolve(window.confirm(message));
+
+  const createEntry = useCallback(async (parent: string, name: string, directory: boolean) => {
+    const path = await createPath(parent, name, directory);
+    setRefresh(value => value + 1);
+    if (!directory) void openFile(path);
+  }, [openFile]);
+
+  // Tab ids contain the path, so a moved file needs a replacement tab in the same position.
+  const renameEntry = useCallback(async (path: string, name: string) => {
+    const affected = Object.keys(filesRef.current).filter(item => movedPath(item, path, '') !== null);
+    if (affected.some(item => saving.current.has(item))) throw new Error('Wait for the file to finish saving.');
+    const renamed = await renamePath(path, name);
+    const moved = (item: string) => movedPath(item, path, renamed) ?? item;
+    setFiles(previous => Object.fromEntries(Object.values(previous).map(file => {
+      const next = moved(file.path);
+      return [next, next === file.path ? file : { ...file, path: next, name: fileName(next) }];
+    })));
+    setActiveFile(moved);
+    const current = sessionRef.current.model;
+    for (const item of affected) {
+      const tab = current.getNodeById(`file:${item}`) as TabNode | undefined;
+      const parent = tab?.getParent();
+      if (!tab || !parent) continue;
+      const next = moved(item);
+      // Add before deleting: a split group disappears when its last tab closes.
+      const selected = 'getSelectedNode' in parent && (parent as TabSetNode).getSelectedNode() === tab;
+      current.doAction(Actions.addNode({ ...tab.toJson(), id: `file:${next}`, name: fileName(next), config: { path: next } }, parent.getId(), DockLocation.CENTER, parent.getChildren().indexOf(tab) + 1, selected));
+      current.doAction(Actions.deleteTab(tab.getId()));
+    }
+    setRefresh(value => value + 1);
+    return renamed;
+  }, []);
+
+  const deleteEntry = useCallback(async (entry: FileEntry) => {
+    const affected = Object.values(filesRef.current).filter(file => movedPath(file.path, entry.path, '') !== null);
+    const unsaved = affected.filter(file => file.content !== file.saved).length;
+    const bin = usesRecycleBin();
+    const message = `${bin ? `Move ${entry.name} to the Recycle Bin?` : `Delete ${entry.name}?`}${entry.directory ? ' All of its contents will be included.' : ''}${unsaved ? ` Unsaved changes in ${unsaved} open file(s) will be lost.` : ''}`;
+    if (!await confirmAction(message, entry.directory ? 'Delete folder' : 'Delete file')) return;
+    try { await deletePath(entry.path); }
+    catch (error) { notify(`Could not delete ${entry.name}: ${String(error)}`); return; }
+    const current = sessionRef.current.model;
+    for (const file of affected) if (current.getNodeById(`file:${file.path}`)) current.doAction(Actions.deleteTab(`file:${file.path}`));
+    setFiles(previous => Object.fromEntries(Object.entries(previous).filter(([path]) => movedPath(path, entry.path, '') === null)));
+    setActiveFile(path => movedPath(path, entry.path, '') === null ? path : '');
+    setRefresh(value => value + 1);
+    notify(bin ? `${entry.name} moved to the Recycle Bin.` : `${entry.name} deleted from this demo session.`);
+  }, [notify]);
+
   const canDiscard = async () => {
     if (!Object.values(filesRef.current).some(file => file.content !== file.saved)) return true;
     const message = 'You have unsaved changes. Discard them?';
@@ -334,12 +363,9 @@ export default function App() {
 
   const factory = (node: TabNode): ReactNode => {
     switch (node.getComponent()) {
-      case 'explorer': return <div className="explorer panel-scroll">
-        <div className="panel-heading"><span>PROJECT FOLDER</span><div><button className="icon-button" title="Refresh files" onClick={() => setRefresh(value => value + 1)}><RefreshCw size={13} /></button><button className="icon-button" title="Open folder" onClick={() => void openFolder()}><FolderOpen size={15} /></button></div></div>
-        <div className="project-heading"><ChevronDown size={13} /><span>{root ? fileName(root) : 'example-project'}</span>{!root && <span className="demo-badge">DEMO</span>}</div>
-        {recoveryBlocked ? <p className="panel-description">Project unavailable. Recovered files remain open.</p> : <Tree key={root ?? 'demo'} refresh={refresh} onOpen={path => void openFile(path)} />}
-        <button className="open-folder-link" onClick={() => void openFolder()}><FolderOpen size={14} /> Open another folder</button>
-      </div>;
+      case 'explorer': return <Explorer key={root ?? 'demo'} projectName={root ? fileName(root) : 'example-project'} demo={!root} blocked={!!recoveryBlocked} refresh={refresh}
+        onRefresh={() => setRefresh(value => value + 1)} onOpenFolder={() => void openFolder()}
+        actions={{ open: path => void openFile(path), create: createEntry, rename: renameEntry, remove: deleteEntry }} />;
       case 'search': return <div className="search-panel panel-scroll"><div className="panel-heading">FIND FILES</div>
         <label className="search-input"><Search size={14} /><input id="file-search" value={query} onChange={event => setQuery(event.target.value)} placeholder="File name or path" /></label>
         <p className="panel-description">{searching ? 'Searching…' : query ? `${matches.length} result(s)` : 'Find files in your project. Use Ctrl+F to search within the code.'}</p>
@@ -430,7 +456,7 @@ export default function App() {
         Object.values(filesRef.current).forEach(file => fresh.doAction(Actions.addNode({ type: 'tab', id: `file:${file.path}`, component: 'file', name: file.name, config: { path: file.path } }, 'documents', DockLocation.CENTER, -1)));
         setModel(fresh); persist(fresh); setSettings(false);
       }}><LayoutTemplate size={16} /> Reset layout</button>
-      <div className="settings-shortcuts"><Keyboard size={17} /><span>Ctrl+P · Find file<br />Ctrl+S · Save<br />Ctrl+F · Search in code<br />Ctrl+` · New terminal</span></div>
+      <div className="settings-shortcuts"><Keyboard size={17} /><span>Ctrl+P · Find file<br />Ctrl+S · Save<br />Ctrl+F · Search in code<br />Ctrl+` · New terminal<br />F2 · Rename in explorer<br />Delete · Delete in explorer</span></div>
       <p className="subtle">Resetting the layout closes open terminal sessions. Files and editor changes are preserved.</p>
     </section></div>}
   </div>;

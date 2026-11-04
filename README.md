@@ -13,7 +13,7 @@ npm install
 npm run dev
 ```
 
-Open http://127.0.0.1:1420. The web preview uses an in-memory demo project. You can edit files, save changes within the session, find files, dock panels, and resize areas. It does not access real folders or run shell commands. Reloading resets demo content while preserving the panel layout.
+Open http://127.0.0.1:1420. The web preview uses an in-memory demo project. You can edit, create, rename, and delete files, save changes within the session, find files, dock panels, and resize areas. It does not access real folders or run shell commands. Reloading resets demo content while preserving the panel layout.
 
 ## Run the Windows app
 
@@ -46,12 +46,21 @@ Native Windows file drag-and-drop is disabled in the WebView to allow HTML panel
 - CodeMirror 6 editing, undo history, in-file search, and language support loaded on demand.
 - File tabs, unsaved-change indicators, discard confirmation, and window-close protection.
 - Reading and saving existing files within the selected workspace.
+- Creating, renaming, and deleting files and folders from the explorer toolbar, the context menu, or the F2 and Delete keys. Deleted items go to the Recycle Bin after confirmation.
 - External-change checks before saving, with a temporary file written in the same directory before replacing the original.
 - PowerShell, CMD, Git Bash, and PowerShell 7 profiles with installation detection, byte-stream output, keyboard input, resizing, and cleanup.
 - English interface, messages, documentation, and demo content.
 - Dark and light themes under **Settings → Appearance**, applied immediately to panels, the editor, and open terminals. The preference is saved locally; switching themes preserves editor history and terminal sessions.
 - Last-project and open-file recovery, including the active file, panel arrangement, and unsaved buffers. Terminal tabs remain empty at startup.
 - Project switcher in the title bar with persistent recent-folder history, most recently opened first. Each entry shows its full path to distinguish folders with the same name. **Open another folder…** opens the folder dialog. Switching projects checks for unsaved changes; unavailable folders keep the current project open.
+
+## File management
+
+Right-click an item or the empty explorer area for **New file**, **New folder**, **Rename**, and **Delete**. The explorer toolbar creates items at the project root. With an item focused, press F2 to rename it or Delete to delete it. Names are edited inline: Enter or clicking away confirms, and Escape cancels.
+
+Names are checked against Windows rules, including reserved names such as `CON`. Existing items are never overwritten. New files open immediately. Renaming moves items within their current folder and keeps open tabs, including unsaved changes, on the new path; undo history for those tabs starts over.
+
+The desktop app moves deleted items to the Recycle Bin and reports an error instead of deleting permanently if it cannot. Windows may still remove items permanently on locations without a Recycle Bin, such as network drives. Deleting asks for confirmation and warns when open files have unsaved changes, which are lost with their tabs. In the web preview, changes affect only the in-memory demo and reset on reload.
 
 ## Session recovery
 
@@ -67,7 +76,7 @@ The status bar shows **Recovery pending**, **Recovery saved**, or **Recovery una
 
 - Automated tests cover the web interface and backend operations. Rust tests include a real PowerShell/ConPTY session with UTF-8 output and a batch file running in a folder with spaces and non-ASCII characters. The complete desktop UI flow still requires manual validation.
 - UTF-8 text files up to 4 MB. Editing may normalize line endings to LF. Binary files are rejected.
-- No file creation, renaming, or deletion; Git integration; LSP; debugging; project-aware autocomplete; extensions; or automatic updates.
+- No moving items between folders by drag and drop; no undo for file operations inside the app; no Git integration; LSP; debugging; project-aware autocomplete; extensions; or automatic updates.
 - Sidebar search finds file names and paths. Use Ctrl+F to search the contents of the active file.
 - No automatic filesystem watching. Refresh the tree manually. A save conflict requires copying your changes and reopening the file.
 - Recovery restores the most recent completed checkpoint; it is not a substitute for saving project files or version control.
@@ -81,7 +90,7 @@ npm run build
 npm test
 ```
 
-The browser tests use the installed Google Chrome by default. Set `LEVE_TEST_BROWSER` to another Playwright channel, such as `msedge`, to override it. Tests cover the editor, layouts, themes, terminal creation, and recovery after interruption, external edits, unavailable projects, and invalid snapshots. Screenshots are written to `artifacts/`.
+The browser tests use the installed Google Chrome by default. Set `LEVE_TEST_BROWSER` to another Playwright channel, such as `msedge`, to override it. Tests cover the editor, file management, layouts, themes, terminal creation, and recovery after interruption, external edits, unavailable projects, and invalid snapshots. Screenshots are written to `artifacts/`.
 
 With Rust configured:
 
@@ -90,7 +99,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 npm run desktop
 ```
 
-For manual desktop validation: open a real folder; edit, save, and reopen a file; reject an overwrite after an external edit; close a dirty tab; run commands with non-ASCII output; run a local batch file; resize a terminal; interrupt a command with Ctrl+C; and confirm terminal sessions close with their tabs or window.
+For manual desktop validation: open a real folder; create, rename, and delete files and folders, confirming deleted items reach the Recycle Bin; edit, save, and reopen a file; reject an overwrite after an external edit; close a dirty tab; run commands with non-ASCII output; run a local batch file; resize a terminal; interrupt a command with Ctrl+C; and confirm terminal sessions close with their tabs or window.
 
 To build a development executable with the interface embedded, without an installer or web server:
 
@@ -112,13 +121,15 @@ The configuration targets an NSIS installer. Installer generation and behavior s
 
 - `src/App.tsx`: application shell, docking, navigation, and file state.
 - `src/Editor.tsx`: CodeMirror integration and language loading.
+- `src/Explorer.tsx`: file tree, context menu, and inline name editing.
 - `src/Terminal.tsx`: terminal frontend and Rust communication.
 - `src/shells.ts`: terminal profile types and preview data.
 - `src/workspace.ts`: workspace access and browser demo.
 - `src/session.ts`: session checkpoint coordination and file reconciliation during recovery.
 - `src-tauri/src/main.rs`: local operations, saving, and PTY sessions.
+- `src-tauri/src/files.rs`: path checks, name validation, and create, rename, and delete operations.
 - `src-tauri/src/shells.rs`: installed-shell discovery and launch configuration.
 - `src-tauri/src/session.rs`: bounded, atomic recovery snapshots and fallback storage.
-- `tests/editor.spec.ts`: browser integration tests.
+- `tests/`: browser integration tests.
 
 See the [product roadmap and to-do list](TODO.md) for the six recommended priorities and their completion status.

@@ -139,6 +139,10 @@ button { border: 0; }
 .python-icon { color: var(--python-icon); flex-shrink: 0; }
 .open-folder-link { margin: 22px 12px; display: flex; align-items: center; gap: 7px; background: transparent; color: var(--accent); font-size: 10px; }
 .panel-description { font-size: 11px; color: var(--muted); line-height: 1.7; margin: 10px 15px; }
+.tree-edit { padding: 3px 12px 3px 0; }
+.tree-edit input { width: 100%; height: 23px; padding: 0 6px; background: var(--bg); color: var(--strong); border: 1px solid var(--accent); border-radius: 3px; outline: none; font: inherit; font-size: 11px; }
+.tree-edit input[aria-invalid="true"] { border-color: var(--error); }
+.tree-edit-error { margin: 4px 0 2px; color: var(--error); font-size: 10px; line-height: 1.4; }
 .inline-error { padding: 10px; color: var(--error); font-size: 11px; }
 .search-input { margin: 0 12px; display: flex; gap: 7px; align-items: center; background: var(--input); border: 1px solid var(--border); padding: 8px; border-radius: 4px; }
 .search-input input { width: 100%; min-width: 0; background: transparent; border: 0; outline: 0; color: var(--text); font-size: 11px; }
@@ -191,6 +195,7 @@ kbd { font-family: inherit; border: 1px solid var(--border); background: var(--h
 .settings-modal .theme-picker p { margin: 10px 0 0; font-size: 10px; }
 .terminal-menu-backdrop { position: fixed; inset: 0; z-index: 45; }
 .terminal-menu { position: fixed; width: 260px; max-height: calc(100dvh - 16px); overflow: auto; padding: 7px; background: var(--panel); border: 1px solid var(--border); border-radius: 7px; box-shadow: 0 8px 30px var(--shadow); }
+.explorer-menu { width: 200px; }
 .terminal-menu-heading { padding: 8px 10px; color: var(--muted); font-size: 9px; letter-spacing: 1px; }
 .terminal-menu button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px; background: transparent; color: var(--text); border-radius: 4px; text-align: left; font-size: 12px; }
 .terminal-menu button:hover:not(:disabled), .terminal-menu button:focus-visible { background: var(--accent-tint); }

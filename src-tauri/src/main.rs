@@ -1,8 +1,10 @@
 #![cfg_attr(all(target_os = "windows", not(test)), windows_subsystem = "windows")]
 
+mod files;
 mod shells;
 mod session;
 
+use files::resolve;
 use portable_pty::{native_pty_system, Child, MasterPty, PtySize};
 #[cfg(test)]
 use portable_pty::CommandBuilder;
@@ -35,14 +37,6 @@ struct Workspace {
 struct FileEntry { name: String, path: String, directory: bool }
 
 fn error(err: impl std::fmt::Display) -> String { err.to_string() }
-
-fn resolve(root: &Path, relative: &str) -> Result<PathBuf, String> {
-    let candidate = root.join(relative).canonicalize().map_err(error)?;
-    if !candidate.starts_with(root) {
-        return Err("The path is outside the project folder.".into());
-    }
-    Ok(candidate)
-}
 
 fn workspace_root(workspace: &Workspace) -> Result<PathBuf, String> {
     workspace.root.lock().map_err(error)?.clone().ok_or_else(|| "Open a folder first.".into())
@@ -122,6 +116,26 @@ async fn write_file(path: String, content: String, expected: String, state: Stat
 }
 
 #[tauri::command]
+async fn create_file(path: String, state: State<'_, Workspace>) -> Result<(), String> {
+    files::create_file(&workspace_root(&state)?, &path)
+}
+
+#[tauri::command]
+async fn create_directory(path: String, state: State<'_, Workspace>) -> Result<(), String> {
+    files::create_directory(&workspace_root(&state)?, &path)
+}
+
+#[tauri::command]
+async fn rename_path(path: String, new_name: String, state: State<'_, Workspace>) -> Result<String, String> {
+    files::rename(&workspace_root(&state)?, &path, &new_name)
+}
+
+#[tauri::command]
+async fn delete_path(path: String, state: State<'_, Workspace>) -> Result<(), String> {
+    files::delete(&workspace_root(&state)?, &path)
+}
+
+#[tauri::command]
 async fn terminal_start(id: String, shell_id: Option<String>, cols: u16, rows: u16, output: Channel<Vec<u8>>, state: State<'_, Workspace>) -> Result<(), String> {
     let root = state.root.lock().map_err(error)?.clone()
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
@@ -174,7 +188,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Workspace::default())
         .manage(session::SessionStore::default())
-        .invoke_handler(tauri::generate_handler![set_workspace, list_directory, read_file, write_file, shells::list_shells, terminal_start, terminal_write, terminal_resize, terminal_close, session::session_load, session::session_save])
+        .invoke_handler(tauri::generate_handler![set_workspace, list_directory, read_file, write_file, create_file, create_directory, rename_path, delete_path, shells::list_shells, terminal_start, terminal_write, terminal_resize, terminal_close, session::session_load, session::session_save])
         .build(tauri::generate_context!())
         .expect("Could not start Leve")
         .run(|app, event| {
