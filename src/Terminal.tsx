@@ -50,10 +50,10 @@ export default function Terminal({ id, root }: { id: string; root: string | null
 
   if (!running) return <div className="terminal-start">
     <TerminalSquare size={24} strokeWidth={1.3} />
-    <div><strong>Seu projeto. Seu terminal.</strong><p>{native ? 'Abra uma sessão do PowerShell na pasta do projeto.' : 'O PowerShell integrado estará disponível no aplicativo Windows.'}</p></div>
-    <button className="button" disabled={!native || !root} onClick={() => setRunning(true)}><Play size={13} /> Iniciar PowerShell</button>
-    {!native && <span className="subtle">Prévia web · nenhum comando é executado aqui</span>}
-    {native && !root && <span className="subtle">Abra uma pasta para iniciar.</span>}
+    <div><strong>Your project. Your terminal.</strong><p>{native ? 'Open a PowerShell session in your project folder.' : 'The integrated PowerShell terminal is available in the Windows app.'}</p></div>
+    <button className="button" disabled={!native || !root} onClick={() => setRunning(true)}><Play size={13} /> Start PowerShell</button>
+    {!native && <span className="subtle">Web preview · no commands run here</span>}
+    {native && !root && <span className="subtle">Open a folder to get started.</span>}
   </div>;
   return <div className="terminal-shell"><div ref={host} className="terminal-host" />{error && <div role="alert" className="terminal-error">{error}</div>}</div>;
 }

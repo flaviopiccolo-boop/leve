@@ -6,11 +6,11 @@ export interface OpenFile { path: string; name: string; content: string; saved: 
 export const native = isTauri();
 
 export const demoFiles: Record<string, string> = {
-  'src/main.py': `from services.greeting import greet\n\n\ndef main():\n    message = greet("mundo")\n    print(message)\n\n\nif __name__ == "__main__":\n    main()\n`,
-  'src/services/greeting.py': `def greet(name: str) -> str:\n    """Uma pequena ideia, um bom começo."""\n    return f"Olá, {name}!"\n`,
-  'README.md': `# Seu próximo projeto começa aqui\n\nBem-vindo ao Leve.\n\n- Arraste as abas para reorganizar os painéis.\n- Abra arquivos pela árvore à esquerda.\n- Use Ctrl+S para salvar e Ctrl+P para encontrar arquivos.\n\nEsta é uma pasta de demonstração. Para editar arquivos reais,\nabra uma pasta no aplicativo desktop.\n`,
+  'src/main.py': `from services.greeting import greet\n\n\ndef main():\n    message = greet("world")\n    print(message)\n\n\nif __name__ == "__main__":\n    main()\n`,
+  'src/services/greeting.py': `def greet(name: str) -> str:\n    """A small idea, a good start."""\n    return f"Hello, {name}!"\n`,
+  'README.md': `# Your next project starts here\n\nWelcome to Leve.\n\n- Drag tabs to rearrange panels.\n- Open files from the tree on the left.\n- Use Ctrl+S to save and Ctrl+P to find files.\n\nThis is a demo folder. To edit real files,\nopen a folder in the desktop app.\n`,
   '.gitignore': '__pycache__/\n.venv/\n',
-  'requirements.txt': '# Adicione as dependências do projeto aqui.\n',
+  'requirements.txt': '# Add project dependencies here.\n',
 };
 
 let demo = { ...demoFiles };
@@ -20,7 +20,7 @@ export function sortEntries(entries: FileEntry[]) {
 }
 export async function pickWorkspace(): Promise<string | null> {
   if (!native) return null;
-  const path = await open({ directory: true, multiple: false, title: 'Abrir pasta do projeto' });
+  const path = await open({ directory: true, multiple: false, title: 'Open project folder' });
   return path;
 }
 export async function activateWorkspace(path: string): Promise<string> {
@@ -49,7 +49,7 @@ export async function writeFile(file: OpenFile): Promise<void> {
 export function fileName(path: string) { return path.split(/[\\/]/).pop() || path; }
 export function languageName(path: string) {
   const ext = path.split('.').pop()?.toLowerCase();
-  return ({ py: 'Python', ts: 'TypeScript', tsx: 'TSX', js: 'JavaScript', jsx: 'JSX', json: 'JSON', md: 'Markdown', css: 'CSS', html: 'HTML' } as Record<string, string>)[ext || ''] || 'Texto';
+  return ({ py: 'Python', ts: 'TypeScript', tsx: 'TSX', js: 'JavaScript', jsx: 'JSX', json: 'JSON', md: 'Markdown', css: 'CSS', html: 'HTML' } as Record<string, string>)[ext || ''] || 'Plain text';
 }
 export async function indexFiles(path = '', depth = 0): Promise<FileEntry[]> {
   if (depth > 15) return [];

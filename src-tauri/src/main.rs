@@ -34,13 +34,13 @@ fn error(err: impl std::fmt::Display) -> String { err.to_string() }
 fn resolve(root: &Path, relative: &str) -> Result<PathBuf, String> {
     let candidate = root.join(relative).canonicalize().map_err(error)?;
     if !candidate.starts_with(root) {
-        return Err("O caminho está fora da pasta do projeto.".into());
+        return Err("The path is outside the project folder.".into());
     }
     Ok(candidate)
 }
 
 fn workspace_root(workspace: &Workspace) -> Result<PathBuf, String> {
-    workspace.root.lock().map_err(error)?.clone().ok_or_else(|| "Abra uma pasta primeiro.".into())
+    workspace.root.lock().map_err(error)?.clone().ok_or_else(|| "Open a folder first.".into())
 }
 
 fn terminal_working_directory(root: &Path) -> &Path {
@@ -49,19 +49,19 @@ fn terminal_working_directory(root: &Path) -> &Path {
 }
 
 fn text_file(path: &Path) -> Result<String, String> {
-    if !path.is_file() { return Err("O caminho não é um arquivo.".into()); }
+    if !path.is_file() { return Err("The path is not a file.".into()); }
     // Limit allocation even if a file grows between metadata lookup and reading.
     let mut data = Vec::new();
     fs::File::open(path).map_err(error)?.take(MAX_FILE_SIZE + 1).read_to_end(&mut data).map_err(error)?;
-    if data.len() as u64 > MAX_FILE_SIZE { return Err("Esta versão abre arquivos de texto de até 4 MB.".into()); }
-    if data.contains(&0) { return Err("Arquivos binários ainda não são suportados.".into()); }
-    String::from_utf8(data).map_err(|_| "Esta versão suporta arquivos em UTF-8.".into())
+    if data.len() as u64 > MAX_FILE_SIZE { return Err("This version opens text files up to 4 MB.".into()); }
+    if data.contains(&0) { return Err("Binary files are not supported yet.".into()); }
+    String::from_utf8(data).map_err(|_| "This version supports UTF-8 files.".into())
 }
 
 #[tauri::command]
 async fn set_workspace(path: String, state: State<'_, Workspace>) -> Result<String, String> {
     let root = PathBuf::from(path).canonicalize().map_err(error)?;
-    if !root.is_dir() { return Err("Selecione uma pasta.".into()); }
+    if !root.is_dir() { return Err("Select a folder.".into()); }
     state.terminals.lock().map_err(error)?.clear();
     let label = dunce::simplified(&root).to_string_lossy().to_string();
     *state.root.lock().map_err(error)? = Some(root);
@@ -95,17 +95,17 @@ async fn read_file(path: String, state: State<'_, Workspace>) -> Result<String, 
 }
 
 fn save_checked(path: &Path, content: &str, expected: &str) -> Result<(), String> {
-    if content.len() as u64 > MAX_FILE_SIZE { return Err("O arquivo ultrapassa o limite de 4 MB desta versão.".into()); }
+    if content.len() as u64 > MAX_FILE_SIZE { return Err("The file exceeds the 4 MB limit for this version.".into()); }
     if text_file(path)? != expected {
-        return Err("O arquivo mudou no disco. Copie suas alterações e reabra o arquivo antes de salvar.".into());
+        return Err("The file has changed on disk. Copy your changes and reopen it before saving.".into());
     }
-    let parent = path.parent().ok_or("Pasta inválida.")?;
+    let parent = path.parent().ok_or("Invalid folder.")?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(error)?;
     temporary.write_all(content.as_bytes()).map_err(error)?;
     temporary.as_file().set_permissions(fs::metadata(path).map_err(error)?.permissions()).map_err(error)?;
     temporary.as_file().sync_all().map_err(error)?;
     // Recheck immediately before replacing, to catch changes made during the write.
-    if text_file(path)? != expected { return Err("O arquivo mudou durante o salvamento. Tente reabri-lo.".into()); }
+    if text_file(path)? != expected { return Err("The file changed while saving. Try reopening it.".into()); }
     temporary.persist(path).map_err(error)?;
     Ok(())
 }
@@ -119,8 +119,8 @@ async fn write_file(path: String, content: String, expected: String, state: Stat
 async fn terminal_start(id: String, cols: u16, rows: u16, output: Channel<Vec<u8>>, state: State<'_, Workspace>) -> Result<(), String> {
     let root = workspace_root(&state)?;
     let mut sessions = state.terminals.lock().map_err(error)?;
-    if sessions.contains_key(&id) { return Err("Esta sessão já está aberta.".into()); }
-    if sessions.len() >= 16 { return Err("Limite de 16 terminais atingido.".into()); }
+    if sessions.contains_key(&id) { return Err("This session is already open.".into()); }
+    if sessions.len() >= 16 { return Err("The limit of 16 terminals has been reached.".into()); }
     let pair = native_pty_system().openpty(PtySize { rows: rows.max(1), cols: cols.max(1), pixel_width: 0, pixel_height: 0 }).map_err(error)?;
     let mut command = CommandBuilder::new("powershell.exe");
     command.args(["-NoLogo", "-NoProfile", "-NoExit", "-Command", "$OutputEncoding = [Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)"]);
@@ -146,7 +146,7 @@ async fn terminal_start(id: String, cols: u16, rows: u16, output: Channel<Vec<u8
 #[tauri::command]
 async fn terminal_write(id: String, data: String, state: State<'_, Workspace>) -> Result<(), String> {
     let mut terminals = state.terminals.lock().map_err(error)?;
-    let terminal = terminals.get_mut(&id).ok_or("Terminal encerrado.")?;
+    let terminal = terminals.get_mut(&id).ok_or("Terminal closed.")?;
     terminal.writer.write_all(data.as_bytes()).map_err(error)?;
     terminal.writer.flush().map_err(error)
 }
@@ -154,7 +154,7 @@ async fn terminal_write(id: String, data: String, state: State<'_, Workspace>) -
 #[tauri::command]
 async fn terminal_resize(id: String, cols: u16, rows: u16, state: State<'_, Workspace>) -> Result<(), String> {
     let mut terminals = state.terminals.lock().map_err(error)?;
-    let terminal = terminals.get_mut(&id).ok_or("Terminal encerrado.")?;
+    let terminal = terminals.get_mut(&id).ok_or("Terminal closed.")?;
     terminal.master.resize(PtySize { rows: rows.max(1), cols: cols.max(1), pixel_width: 0, pixel_height: 0 }).map_err(error)
 }
 
@@ -170,7 +170,7 @@ fn main() {
         .manage(Workspace::default())
         .invoke_handler(tauri::generate_handler![set_workspace, list_directory, read_file, write_file, terminal_start, terminal_write, terminal_resize, terminal_close])
         .build(tauri::generate_context!())
-        .expect("Não foi possível iniciar o Leve")
+        .expect("Could not start Leve")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 if let Ok(mut sessions) = app.state::<Workspace>().terminals.lock() { sessions.clear(); }
@@ -240,7 +240,7 @@ mod tests {
         let _ = child.wait();
         drop(pair.master);
         let output = String::from_utf8_lossy(&output).into_owned();
-        assert!(output.contains(marker), "Saída recebida: {output:?}");
+        assert!(output.contains(marker), "Received output: {output:?}");
         output
     }
 
@@ -262,7 +262,7 @@ mod tests {
         assert!(canonical.to_string_lossy().starts_with(r"\\?\"));
         let output = run_powershell(Some(&canonical), "& '.\\check.cmd'; exit $LASTEXITCODE", "LEVE_RELATIVE_FILE_OK");
         let expected_directory = format!("LEVE_CWD={}", terminal_working_directory(&canonical).display());
-        assert!(output.contains(&expected_directory), "Saída recebida: {output:?}");
+        assert!(output.contains(&expected_directory), "Received output: {output:?}");
         assert!(!output.contains("UNC paths are not supported"));
         assert!(!output.contains("Microsoft.PowerShell.Core\\FileSystem::"));
     }

@@ -1,100 +1,105 @@
 # Leve Editor
 
-Base de um editor desktop para Windows, com navegação à esquerda, código no centro e terminais embaixo. “Leve” é um nome provisório; ainda não há medições que estabeleçam seu consumo em comparação com outros editores.
+An early Windows desktop code editor with a file explorer on the left, an editor in the center, and terminals at the bottom. Panels can be rearranged by dragging their tabs.
 
-## Experimentar a interface
+“Leve” is the project's working name. Memory usage and performance have not yet been benchmarked against other editors.
 
-Requer Node.js 22.12+ ou 24 e npm.
+## Try the interface
+
+Requires Node.js 22.12+ or 24 and npm.
 
 ```powershell
 npm install
 npm run dev
 ```
 
-Abra http://127.0.0.1:1420. A prévia web usa uma pasta de demonstração em memória. É possível editar, salvar na sessão, buscar nomes de arquivos, arrastar painéis e redimensionar áreas. Ela não acessa pastas reais nem executa comandos. Recarregar a página descarta o conteúdo da demonstração e mantém a disposição dos painéis.
+Open http://127.0.0.1:1420. The web preview uses an in-memory demo project. You can edit files, save changes within the session, find files, dock panels, and resize areas. It does not access real folders or run shell commands. Reloading resets demo content while preserving the panel layout.
 
-## Rodar como aplicativo Windows
+## Run the Windows app
 
-Além do Node.js, instale os [pré-requisitos oficiais do Tauri](https://v2.tauri.app/start/prerequisites/):
+In addition to Node.js, install the [official Tauri prerequisites](https://v2.tauri.app/start/prerequisites/):
 
-- Rust estável com toolchain MSVC (`rustc` e `cargo` no PATH).
-- Microsoft C++ Build Tools com a carga de trabalho de desenvolvimento desktop C++ e Windows SDK.
+- Stable Rust with the MSVC toolchain (`rustc` and `cargo` on PATH).
+- Microsoft C++ Build Tools with the Desktop development with C++ workload and Windows SDK.
 - Microsoft Edge WebView2 Runtime.
 
 ```powershell
 npm run desktop
 ```
 
-No aplicativo, use **Abrir pasta** para selecionar um projeto real. A árvore carrega subpastas conforme são abertas. Abra um arquivo e use **Ctrl+S** para salvar. No painel inferior, **Iniciar PowerShell** cria uma sessão na pasta selecionada. O botão **+** cria outra aba; cada sessão inicia somente quando solicitada.
+Select **Open folder** to choose a real project. The explorer loads subfolders as you expand them. Open a file and press **Ctrl+S** to save it. Select **Start PowerShell** in the bottom panel to open a shell in the selected folder. The **+** button adds another terminal tab; sessions start only when requested.
 
-O terminal usa xterm.js na interface e portable-pty/ConPTY no backend. Esta primeira implementação inicia `powershell.exe` sem perfil, configura entrada/saída em UTF-8 e mantém a sessão interativa aberta. A interface responde às consultas de posição do cursor emitidas durante a inicialização. Fechar a aba, restaurar o layout, trocar de projeto ou sair do aplicativo encerra as sessões correspondentes. Processos iniciados pelo usuário que se desliguem da sessão podem continuar rodando.
+The terminal uses xterm.js in the frontend and portable-pty/ConPTY in Rust. PowerShell starts without a profile, uses UTF-8 input/output, and remains interactive. The frontend answers cursor-position queries during startup. Workspace paths are converted to a shell-compatible format when possible, so local batch files can retain the correct working directory.
 
-O arraste nativo de arquivos do Windows está desativado na WebView para permitir o arraste HTML dos painéis. A abertura de projetos usa o seletor de pastas.
+Closing a terminal tab, resetting the layout, changing projects, or exiting the app ends the corresponding sessions. Processes that detach from a session may continue running.
 
-## O que está implementado
+Native Windows file drag-and-drop is disabled in the WebView to allow HTML panel dragging. Projects are opened through the folder picker.
 
-- Interface React + TypeScript com Tauri 2 / Rust.
-- Painéis encaixáveis com FlexLayout (MIT), divisórias ajustáveis, agrupamento e divisão por arraste.
-- Persistência do layout no armazenamento local e restauração do padrão.
-- Árvore de arquivos, atualização manual e busca por nome/caminho (índice limitado a 5.000 arquivos e 15 níveis; ignora pastas comuns de dependências/build).
-- CodeMirror 6 com histórico de edição, busca dentro do arquivo e linguagens carregadas sob demanda.
-- Abas de arquivos, indicador de alterações, confirmação ao descartar e proteção ao fechar a janela.
-- Backend de leitura e salvamento de arquivos existentes dentro da pasta selecionada.
-- Verificação de conflito com alterações externas antes de salvar; escrita em arquivo temporário no mesmo diretório antes de substituir o original.
-- Backend de PowerShell com entrada, saída em bytes, redimensionamento e encerramento de sessões.
+## Implemented features
 
-## Limites desta primeira versão
+- React and TypeScript frontend with Tauri 2 and Rust.
+- Dockable panels using FlexLayout (MIT), adjustable splitters, tab grouping, and split views.
+- Saved panel layouts and a reset-to-default action. Built-in panel titles are updated when loading layouts saved by earlier versions.
+- Lazy file tree, manual refresh, and file name/path search. The index is limited to 5,000 files and 15 levels, excluding common dependency and build folders.
+- CodeMirror 6 editing, undo history, in-file search, and language support loaded on demand.
+- File tabs, unsaved-change indicators, discard confirmation, and window-close protection.
+- Reading and saving existing files within the selected workspace.
+- External-change checks before saving, with a temporary file written in the same directory before replacing the original.
+- PowerShell sessions with byte-stream output, keyboard input, resizing, and cleanup.
+- English interface, messages, documentation, and demo content.
 
-- O frontend e o backend têm testes automatizados. Os testes Rust incluem uma sessão real de PowerShell/ConPTY com saída em UTF-8 e a execução de um arquivo batch em uma pasta com espaços e acentos. O fluxo completo da interface desktop ainda precisa de validação manual.
-- Arquivos de texto UTF-8 de até 4 MB. A edição pode normalizar quebras de linha para LF. Arquivos binários são recusados.
-- Sem criação/renomeação/exclusão de arquivos, Git, LSP, depuração, autocomplete de projeto, extensões ou atualização automática.
-- A busca lateral encontra nomes/caminhos; busca de conteúdo usa Ctrl+F no arquivo aberto.
-- Sem monitoramento automático de alterações externas. Atualize a árvore pelo botão de atualização. Um conflito no salvamento exige copiar suas alterações e reabrir o arquivo.
-- Layout salvo, mas arquivos abertos e conteúdo não salvo não são recuperados após reiniciar ou uma falha.
-- A checagem de conflito não constitui bloqueio transacional contra outros programas escrevendo no mesmo instante.
-- Pastas reais e terminal estão disponíveis apenas no aplicativo desktop. No máximo 16 sessões simultâneas; esta base ainda não oferece reconexão/reinício automático após o shell sair.
+## Current limitations
 
-## Validar
+- Automated tests cover the web interface and backend operations. Rust tests include a real PowerShell/ConPTY session with UTF-8 output and a batch file running in a folder with spaces and non-ASCII characters. The complete desktop UI flow still requires manual validation.
+- UTF-8 text files up to 4 MB. Editing may normalize line endings to LF. Binary files are rejected.
+- No file creation, renaming, or deletion; Git integration; LSP; debugging; project-aware autocomplete; extensions; or automatic updates.
+- Sidebar search finds file names and paths. Use Ctrl+F to search the contents of the active file.
+- No automatic filesystem watching. Refresh the tree manually. A save conflict requires copying your changes and reopening the file.
+- Panel layouts persist, but open files and unsaved content are not recovered after a restart or crash.
+- Conflict detection is not a transactional lock against another process writing at the same instant.
+- Real folders and shells are available only in the desktop app. There is a limit of 16 simultaneous terminal sessions and no automatic reconnection or restart after a shell exits.
+
+## Validate changes
 
 ```powershell
 npm run build
 npm test
 ```
 
-Os testes usam o Microsoft Edge instalado e verificam o layout, edição/salvamento, busca, proteção de alterações e persistência após arraste. Capturas ficam em `artifacts/`.
+The browser tests use the installed Microsoft Edge and check the initial layout, editing and saving, file search, unsaved-change protection, layout persistence after dragging, and English labels in previously saved layouts. Screenshots are written to `artifacts/`.
 
-Com o Rust configurado:
+With Rust configured:
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml
 npm run desktop
 ```
 
-Confira na versão nativa: abrir uma pasta real, editar/salvar e reabrir um arquivo, recusar sobrescrita após mudança externa, fechar uma aba com alterações, executar comandos com acentos, redimensionar o terminal, interromper um comando com Ctrl+C e encerrar sessões ao fechar abas/janela.
+For manual desktop validation: open a real folder; edit, save, and reopen a file; reject an overwrite after an external edit; close a dirty tab; run commands with non-ASCII output; run a local batch file; resize a terminal; interrupt a command with Ctrl+C; and confirm terminal sessions close with their tabs or window.
 
-Para gerar um executável de desenvolvimento com a interface incluída, sem instalador e sem servidor web:
+To build a development executable with the interface embedded, without an installer or web server:
 
 ```powershell
 npm run desktop:build:dev
 ```
 
-O resultado fica em `src-tauri/target/debug/leve-editor.exe`. Essa compilação não é otimizada e não serve para medir o consumo ou desempenho final. Após instalar Rust, abra um novo terminal para que o PATH inclua Cargo.
+The output is `src-tauri/target/debug/leve-editor.exe`. This build is not optimized and should not be used to evaluate final resource usage or performance. After installing Rust, open a new terminal so PATH includes Cargo. Close the running editor before replacing its executable.
 
-## Gerar instalador
+## Build an installer
 
 ```powershell
 npm run desktop:build
 ```
 
-A configuração aponta para um instalador NSIS. A geração e o funcionamento desse instalador ainda precisam de validação nativa. Distribuição portátil, assinatura e atualização ficam para uma próxima etapa.
+The configuration targets an NSIS installer. Installer generation and behavior still require native validation. Portable packaging, signing, and updates are future work.
 
-## Organização
+## Project structure
 
-- `src/App.tsx`: estrutura do aplicativo, painéis, navegação e estado dos arquivos.
-- `src/Editor.tsx`: CodeMirror e carregamento das linguagens.
-- `src/Terminal.tsx`: interface do terminal e comunicação com Rust.
-- `src/workspace.ts`: acesso ao workspace e demonstração web.
-- `src-tauri/src/main.rs`: operações locais, salvamento e sessões PTY.
-- `tests/editor.spec.ts`: testes de integração da interface.
+- `src/App.tsx`: application shell, docking, navigation, and file state.
+- `src/Editor.tsx`: CodeMirror integration and language loading.
+- `src/Terminal.tsx`: terminal frontend and Rust communication.
+- `src/workspace.ts`: workspace access and browser demo.
+- `src-tauri/src/main.rs`: local operations, saving, and PTY sessions.
+- `tests/editor.spec.ts`: browser integration tests.
 
-As próximas decisões de produto são a linguagem prioritária para LSP, suporte a Git e comportamento de recuperação da sessão. Elas podem ser definidas usando esta base.
+The next product decisions are the first language to support through LSP, Git integration, and session recovery.

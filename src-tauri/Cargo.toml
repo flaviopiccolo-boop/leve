@@ -1,7 +1,7 @@
 [package]
 name = "leve-editor"
 version = "0.1.0"
-description = "Um editor local com espaço para criar"
+description = "A local editor with room to create"
 edition = "2021"
 
 [build-dependencies]

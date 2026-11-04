@@ -9,8 +9,8 @@ test('starts with the explorer on the left and terminals below the editor', asyn
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.goto('/');
-  await expect(page.getByRole('heading', { name: 'Espaço para criar.' })).toBeVisible();
-  await expect(page.getByText('Prévia web · nenhum comando é executado aqui')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Room to create.' })).toBeVisible();
+  await expect(page.getByText('Web preview · no commands run here')).toBeVisible();
   const tree = await page.locator('.explorer').boundingBox();
   const editor = await page.locator('.welcome').boundingBox();
   const terminal = await page.locator('.terminal-start').boundingBox();
@@ -28,16 +28,16 @@ test('edits a file, marks it dirty, saves and preserves the session content afte
   await expect(code).toContainText('from services.greeting import greet');
   await code.click();
   await page.keyboard.press('Control+End');
-  await page.keyboard.insertText('\n# arquivo editado');
+  await page.keyboard.insertText('\n# edited file');
   await expect(page.getByRole('tab', { name: 'main.py', exact: true }).locator('.dirty-dot')).toHaveCount(1);
   await page.keyboard.press('Control+s');
   await expect(page.getByRole('tab', { name: 'main.py', exact: true }).locator('.dirty-dot')).toHaveCount(0);
-  await expect(page.getByRole('status')).toContainText('salvo apenas na demonstração');
+  await expect(page.getByRole('status')).toContainText('saved only in this demo');
   const tab = page.getByRole('tab', { name: 'main.py', exact: true });
   await tab.locator('.flexlayout__tab_button_trailing').click();
   await page.getByRole('button', { name: 'main.py', exact: true }).click();
-  await expect(page.locator('.cm-content')).toContainText('# arquivo editado');
-  await page.getByRole('button', { name: 'Fechar aviso' }).click();
+  await expect(page.locator('.cm-content')).toContainText('# edited file');
+  await page.getByRole('button', { name: 'Dismiss notification' }).click();
   await page.screenshot({ path: 'artifacts/leve-code.png' });
 });
 
@@ -55,16 +55,16 @@ test('preserves unsaved content when closing is cancelled', async ({ page }) => 
   await page.getByRole('button', { name: 'main.py', exact: true }).click();
   await page.locator('.cm-content').click();
   await page.keyboard.press('Control+End');
-  await page.keyboard.insertText('\n# não perder');
+  await page.keyboard.insertText('\n# keep this change');
   page.once('dialog', dialog => dialog.dismiss());
   await page.getByRole('tab', { name: 'main.py', exact: true }).locator('.flexlayout__tab_button_trailing').click();
-  await expect(page.locator('.cm-content')).toContainText('# não perder');
+  await expect(page.locator('.cm-content')).toContainText('# keep this change');
   await expect(page.getByRole('tab', { name: 'main.py', exact: true }).locator('.dirty-dot')).toHaveCount(1);
 });
 
 test('moves the explorer to the right and restores the saved layout on reload', async ({ page }) => {
   await page.goto('/');
-  const tab = await page.locator('.flexlayout__tab_button').filter({ hasText: 'Explorador' }).boundingBox();
+  const tab = await page.locator('.flexlayout__tab_button').filter({ hasText: 'Explorer' }).boundingBox();
   const editor = await page.locator('.welcome').boundingBox();
   await page.mouse.move(tab!.x + tab!.width / 2, tab!.y + tab!.height / 2);
   await page.mouse.down();
@@ -77,4 +77,23 @@ test('moves the explorer to the right and restores the saved layout on reload', 
   const restoredExplorer = await page.locator('.explorer').boundingBox();
   const restoredEditor = await page.locator('.welcome').boundingBox();
   expect(restoredExplorer!.x).toBeGreaterThan(restoredEditor!.x);
+});
+
+test('updates built-in labels in layouts saved by older versions', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('tab', { name: 'Search', exact: true }).click();
+  await page.evaluate(() => {
+    const layout = JSON.parse(localStorage.getItem('leve.layout.v1')!);
+    const legacyNames: Record<string, string> = { explorer: 'Explorador', search: 'Pesquisa', welcome: 'Bem-vindo' };
+    const rename = (node: { component?: string; name?: string; children?: any[] }) => {
+      if (node.component && legacyNames[node.component]) node.name = legacyNames[node.component];
+      node.children?.forEach(rename);
+    };
+    rename(layout.layout);
+    localStorage.setItem('leve.layout.v1', JSON.stringify(layout));
+  });
+  await page.reload();
+  await expect(page.getByRole('tab', { name: 'Explorer', exact: true })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Search', exact: true })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Welcome', exact: true })).toBeVisible();
 });

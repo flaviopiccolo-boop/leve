@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-window",
-  "description": "Recursos locais da janela principal do editor",
+  "description": "Local capabilities for the main editor window",
   "windows": ["main"],
   "permissions": ["core:default", "core:window:allow-destroy", "dialog:allow-open", "dialog:allow-message"]
 }
