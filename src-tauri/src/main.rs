@@ -1,0 +1,269 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use serde::Serialize;
+use std::{collections::HashMap, fs, io::{Read, Write}, path::{Path, PathBuf}, sync::Mutex};
+use tauri::{ipc::Channel, Manager, State};
+
+const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024;
+
+struct TerminalSession {
+    master: Box<dyn MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
+    child: Box<dyn Child + Send + Sync>,
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[derive(Default)]
+struct Workspace {
+    root: Mutex<Option<PathBuf>>,
+    terminals: Mutex<HashMap<String, TerminalSession>>,
+}
+
+#[derive(Serialize)]
+struct FileEntry { name: String, path: String, directory: bool }
+
+fn error(err: impl std::fmt::Display) -> String { err.to_string() }
+
+fn resolve(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    let candidate = root.join(relative).canonicalize().map_err(error)?;
+    if !candidate.starts_with(root) {
+        return Err("O caminho está fora da pasta do projeto.".into());
+    }
+    Ok(candidate)
+}
+
+fn workspace_root(workspace: &Workspace) -> Result<PathBuf, String> {
+    workspace.root.lock().map_err(error)?.clone().ok_or_else(|| "Abra uma pasta primeiro.".into())
+}
+
+fn terminal_working_directory(root: &Path) -> &Path {
+    // Keep canonical paths internally; shells and batch files need DOS paths.
+    dunce::simplified(root)
+}
+
+fn text_file(path: &Path) -> Result<String, String> {
+    if !path.is_file() { return Err("O caminho não é um arquivo.".into()); }
+    // Limit allocation even if a file grows between metadata lookup and reading.
+    let mut data = Vec::new();
+    fs::File::open(path).map_err(error)?.take(MAX_FILE_SIZE + 1).read_to_end(&mut data).map_err(error)?;
+    if data.len() as u64 > MAX_FILE_SIZE { return Err("Esta versão abre arquivos de texto de até 4 MB.".into()); }
+    if data.contains(&0) { return Err("Arquivos binários ainda não são suportados.".into()); }
+    String::from_utf8(data).map_err(|_| "Esta versão suporta arquivos em UTF-8.".into())
+}
+
+#[tauri::command]
+async fn set_workspace(path: String, state: State<'_, Workspace>) -> Result<String, String> {
+    let root = PathBuf::from(path).canonicalize().map_err(error)?;
+    if !root.is_dir() { return Err("Selecione uma pasta.".into()); }
+    state.terminals.lock().map_err(error)?.clear();
+    let label = dunce::simplified(&root).to_string_lossy().to_string();
+    *state.root.lock().map_err(error)? = Some(root);
+    Ok(label)
+}
+
+#[tauri::command]
+async fn list_directory(path: String, state: State<'_, Workspace>) -> Result<Vec<FileEntry>, String> {
+    let root = workspace_root(&state)?;
+    let directory = resolve(&root, &path)?;
+    let mut entries = Vec::new();
+    for item in fs::read_dir(directory).map_err(error)? {
+        let item = item.map_err(error)?;
+        // Do not traverse symbolic links outside (or back into) the workspace.
+        let kind = item.file_type().map_err(error)?;
+        if kind.is_symlink() { continue; }
+        let item_path = item.path();
+        let relative = item_path.strip_prefix(&root).map_err(error)?;
+        entries.push(FileEntry {
+            name: item.file_name().to_string_lossy().into_owned(),
+            path: relative.to_string_lossy().replace('\\', "/"),
+            directory: kind.is_dir(),
+        });
+    }
+    Ok(entries)
+}
+
+#[tauri::command]
+async fn read_file(path: String, state: State<'_, Workspace>) -> Result<String, String> {
+    text_file(&resolve(&workspace_root(&state)?, &path)?)
+}
+
+fn save_checked(path: &Path, content: &str, expected: &str) -> Result<(), String> {
+    if content.len() as u64 > MAX_FILE_SIZE { return Err("O arquivo ultrapassa o limite de 4 MB desta versão.".into()); }
+    if text_file(path)? != expected {
+        return Err("O arquivo mudou no disco. Copie suas alterações e reabra o arquivo antes de salvar.".into());
+    }
+    let parent = path.parent().ok_or("Pasta inválida.")?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(error)?;
+    temporary.write_all(content.as_bytes()).map_err(error)?;
+    temporary.as_file().set_permissions(fs::metadata(path).map_err(error)?.permissions()).map_err(error)?;
+    temporary.as_file().sync_all().map_err(error)?;
+    // Recheck immediately before replacing, to catch changes made during the write.
+    if text_file(path)? != expected { return Err("O arquivo mudou durante o salvamento. Tente reabri-lo.".into()); }
+    temporary.persist(path).map_err(error)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn write_file(path: String, content: String, expected: String, state: State<'_, Workspace>) -> Result<(), String> {
+    save_checked(&resolve(&workspace_root(&state)?, &path)?, &content, &expected)
+}
+
+#[tauri::command]
+async fn terminal_start(id: String, cols: u16, rows: u16, output: Channel<Vec<u8>>, state: State<'_, Workspace>) -> Result<(), String> {
+    let root = workspace_root(&state)?;
+    let mut sessions = state.terminals.lock().map_err(error)?;
+    if sessions.contains_key(&id) { return Err("Esta sessão já está aberta.".into()); }
+    if sessions.len() >= 16 { return Err("Limite de 16 terminais atingido.".into()); }
+    let pair = native_pty_system().openpty(PtySize { rows: rows.max(1), cols: cols.max(1), pixel_width: 0, pixel_height: 0 }).map_err(error)?;
+    let mut command = CommandBuilder::new("powershell.exe");
+    command.args(["-NoLogo", "-NoProfile", "-NoExit", "-Command", "$OutputEncoding = [Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)"]);
+    command.cwd(terminal_working_directory(&root));
+    command.env("TERM", "xterm-256color");
+    let mut reader = pair.master.try_clone_reader().map_err(error)?;
+    let writer = pair.master.take_writer().map_err(error)?;
+    let child = pair.slave.spawn_command(command).map_err(error)?;
+    drop(pair.slave);
+    sessions.insert(id, TerminalSession { master: pair.master, writer, child });
+    std::thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => if output.send(buffer[..count].to_vec()).is_err() { break; },
+            }
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+async fn terminal_write(id: String, data: String, state: State<'_, Workspace>) -> Result<(), String> {
+    let mut terminals = state.terminals.lock().map_err(error)?;
+    let terminal = terminals.get_mut(&id).ok_or("Terminal encerrado.")?;
+    terminal.writer.write_all(data.as_bytes()).map_err(error)?;
+    terminal.writer.flush().map_err(error)
+}
+
+#[tauri::command]
+async fn terminal_resize(id: String, cols: u16, rows: u16, state: State<'_, Workspace>) -> Result<(), String> {
+    let mut terminals = state.terminals.lock().map_err(error)?;
+    let terminal = terminals.get_mut(&id).ok_or("Terminal encerrado.")?;
+    terminal.master.resize(PtySize { rows: rows.max(1), cols: cols.max(1), pixel_width: 0, pixel_height: 0 }).map_err(error)
+}
+
+#[tauri::command]
+async fn terminal_close(id: String, state: State<'_, Workspace>) -> Result<(), String> {
+    state.terminals.lock().map_err(error)?.remove(&id);
+    Ok(())
+}
+
+fn main() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .manage(Workspace::default())
+        .invoke_handler(tauri::generate_handler![set_workspace, list_directory, read_file, write_file, terminal_start, terminal_write, terminal_resize, terminal_close])
+        .build(tauri::generate_context!())
+        .expect("Não foi possível iniciar o Leve")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Ok(mut sessions) = app.state::<Workspace>().terminals.lock() { sessions.clear(); }
+            }
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_paths_outside_workspace() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("project");
+        fs::create_dir(&root).unwrap();
+        fs::write(base.path().join("outside.txt"), "private").unwrap();
+        let root = root.canonicalize().unwrap();
+        assert!(resolve(&root, "../outside.txt").is_err());
+    }
+
+    #[test]
+    fn preserves_external_changes_and_saves_matching_content() {
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("main.py");
+        fs::write(&path, "external change").unwrap();
+        assert!(save_checked(&path, "my edit", "old content").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "external change");
+        save_checked(&path, "my edit", "external change").unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), "my edit");
+    }
+
+    #[cfg(windows)]
+    fn run_powershell(cwd: Option<&Path>, script: &str, marker: &str) -> String {
+        let pair = native_pty_system().openpty(PtySize {
+            rows: 24, cols: 80, pixel_width: 0, pixel_height: 0,
+        }).unwrap();
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let mut command = CommandBuilder::new("powershell.exe");
+        let script = format!("[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); {script}");
+        command.args(["-NoLogo", "-NoProfile", "-Command", &script]);
+        if let Some(cwd) = cwd { command.cwd(terminal_working_directory(cwd)); }
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buffer = [0_u8; 4096];
+            while let Ok(count) = reader.read(&mut buffer) {
+                if count == 0 { break; }
+                if send.send(buffer[..count].to_vec()).is_err() { break; }
+            }
+        });
+        let mut output = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+            let Ok(chunk) = receive.recv_timeout(remaining) else { break; };
+            output.extend_from_slice(&chunk);
+            // xterm.js answers this terminal cursor-position query in the app.
+            if output.windows(4).any(|bytes| bytes == b"\x1b[6n") {
+                let _ = writer.write_all(b"\x1b[1;1R");
+                let _ = writer.flush();
+            }
+            if String::from_utf8_lossy(&output).contains(marker) { break; }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        drop(pair.master);
+        let output = String::from_utf8_lossy(&output).into_owned();
+        assert!(output.contains(marker), "Saída recebida: {output:?}");
+        output
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_outputs_unicode_through_a_real_pty() {
+        run_powershell(None, "[Console]::WriteLine('LEVE_PTY_OK_ação'); exit 0", "LEVE_PTY_OK_ação");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn batch_files_keep_the_workspace_directory() {
+        let base = tempfile::tempdir().unwrap();
+        let project = base.path().join("project with spaces ação");
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("relative.txt"), "LEVE_RELATIVE_FILE_OK\r\n").unwrap();
+        fs::write(project.join("check.cmd"), "@echo off\r\necho LEVE_CWD=%CD%\r\ntype relative.txt\r\n").unwrap();
+        let canonical = project.canonicalize().unwrap();
+        assert!(canonical.to_string_lossy().starts_with(r"\\?\"));
+        let output = run_powershell(Some(&canonical), "& '.\\check.cmd'; exit $LASTEXITCODE", "LEVE_RELATIVE_FILE_OK");
+        let expected_directory = format!("LEVE_CWD={}", terminal_working_directory(&canonical).display());
+        assert!(output.contains(&expected_directory), "Saída recebida: {output:?}");
+        assert!(!output.contains("UNC paths are not supported"));
+        assert!(!output.contains("Microsoft.PowerShell.Core\\FileSystem::"));
+    }
+}
