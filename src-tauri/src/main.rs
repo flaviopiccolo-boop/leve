@@ -1,6 +1,7 @@
 #![cfg_attr(all(target_os = "windows", not(test)), windows_subsystem = "windows")]
 
 mod shells;
+mod session;
 
 use portable_pty::{native_pty_system, Child, MasterPty, PtySize};
 #[cfg(test)]
@@ -172,7 +173,8 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Workspace::default())
-        .invoke_handler(tauri::generate_handler![set_workspace, list_directory, read_file, write_file, shells::list_shells, terminal_start, terminal_write, terminal_resize, terminal_close])
+        .manage(session::SessionStore::default())
+        .invoke_handler(tauri::generate_handler![set_workspace, list_directory, read_file, write_file, shells::list_shells, terminal_start, terminal_write, terminal_resize, terminal_close, session::session_load, session::session_save])
         .build(tauri::generate_context!())
         .expect("Could not start Leve")
         .run(|app, event| {

@@ -50,6 +50,17 @@ Native Windows file drag-and-drop is disabled in the WebView to allow HTML panel
 - PowerShell, CMD, Git Bash, and PowerShell 7 profiles with installation detection, byte-stream output, keyboard input, resizing, and cleanup.
 - English interface, messages, documentation, and demo content.
 - Dark and light themes under **Settings → Appearance**, applied immediately to panels, the editor, and open terminals. The preference is saved locally; switching themes preserves editor history and terminal sessions.
+- Last-project and open-file recovery, including the active file, panel arrangement, and unsaved buffers. Terminal tabs remain empty at startup.
+
+## Session recovery
+
+The desktop app checkpoints the current session to its local application data directory, under `recovery/session.json`, roughly every 400 ms while state changes. A normal window close waits for the latest checkpoint. Files in the project are written only when you explicitly save them.
+
+Recovery snapshots are written atomically. A previous valid snapshot is kept in `session.previous.json` and used if the current snapshot cannot be read. The browser preview uses local storage instead of the native recovery files.
+
+On startup, the last project, open file tabs, active file, and docking layout are restored. Unmodified files are read again from disk. Unsaved buffers retain their original disk baseline, so external edits are detected before saving; if the recovered text already matches the disk, it is treated as saved. Missing project folders keep the recovered buffers available with a **Retry recovery** action. Invalid recovery data is preserved until the user explicitly starts a new session.
+
+The status bar shows **Recovery pending**, **Recovery saved**, or **Recovery unavailable**. Write failures display an error and a retry action. A sudden failure can lose edits made since the last completed checkpoint. Native snapshots support up to 100 files, 4 MB per file, and 32 MB total including the saved baselines and layout. Browser storage limits depend on the browser. Undo history and cursor positions are not restored across restarts, and multiple app instances do not coordinate their recovery snapshots.
 
 ## Current limitations
 
@@ -58,7 +69,7 @@ Native Windows file drag-and-drop is disabled in the WebView to allow HTML panel
 - No file creation, renaming, or deletion; Git integration; LSP; debugging; project-aware autocomplete; extensions; or automatic updates.
 - Sidebar search finds file names and paths. Use Ctrl+F to search the contents of the active file.
 - No automatic filesystem watching. Refresh the tree manually. A save conflict requires copying your changes and reopening the file.
-- Panel layouts persist, but open files and unsaved content are not recovered after a restart or crash.
+- Recovery restores the most recent completed checkpoint; it is not a substitute for saving project files or version control.
 - Conflict detection is not a transactional lock against another process writing at the same instant.
 - Real folders and shells are available only in the desktop app. There is a limit of 16 simultaneous terminal sessions and no automatic reconnection or restart after a shell exits.
 
@@ -69,7 +80,7 @@ npm run build
 npm test
 ```
 
-The browser tests use the installed Microsoft Edge and check the initial layout, editing and saving, file search, unsaved-change protection, layout persistence after dragging, and English labels in previously saved layouts. Screenshots are written to `artifacts/`.
+The browser tests use the installed Google Chrome by default. Set `LEVE_TEST_BROWSER` to another Playwright channel, such as `msedge`, to override it. Tests cover the editor, layouts, themes, terminal creation, and recovery after interruption, external edits, unavailable projects, and invalid snapshots. Screenshots are written to `artifacts/`.
 
 With Rust configured:
 
@@ -103,8 +114,10 @@ The configuration targets an NSIS installer. Installer generation and behavior s
 - `src/Terminal.tsx`: terminal frontend and Rust communication.
 - `src/shells.ts`: terminal profile types and preview data.
 - `src/workspace.ts`: workspace access and browser demo.
+- `src/session.ts`: session checkpoint coordination and file reconciliation during recovery.
 - `src-tauri/src/main.rs`: local operations, saving, and PTY sessions.
 - `src-tauri/src/shells.rs`: installed-shell discovery and launch configuration.
+- `src-tauri/src/session.rs`: bounded, atomic recovery snapshots and fallback storage.
 - `tests/editor.spec.ts`: browser integration tests.
 
-The next product decisions are the first language to support through LSP, Git integration, and session recovery.
+The next product decisions are file-management operations, project-wide content search, the first language to support through LSP, and Git integration.

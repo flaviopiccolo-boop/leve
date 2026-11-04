@@ -4,6 +4,7 @@ import { Blocks, ChevronDown, ChevronRight, Code2, FileCode2, Files, Folder, Fol
 import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import { useTheme } from './theme';
 import { loadShells, previewShells, type ShellProfile } from './shells';
+import { loadSession, restoreFiles, saveSession, type Session } from './session';
 import { activateWorkspace, fileName, indexFiles, languageName, listFiles, native, pickWorkspace, readFile, writeFile, type FileEntry, type OpenFile } from './workspace';
 
 const LAYOUT_KEY = 'leve.layout.v1';
@@ -26,16 +27,16 @@ const initialLayout = (): IJsonModel => ({
   ] },
 });
 
-function loadLayout() {
+function loadLayout(savedLayout?: IJsonModel, restoredFiles?: Set<string>) {
   try {
-    const raw = localStorage.getItem(LAYOUT_KEY);
+    const raw = savedLayout ? JSON.stringify(savedLayout) : localStorage.getItem(LAYOUT_KEY);
     if (raw) {
       const json = JSON.parse(raw) as IJsonModel;
-      // Never restore file content or open shells from an earlier workspace.
+      // Restore only validated file buffers, and never restart terminal sessions.
       const panelNames: Record<string, string> = { explorer: 'Explorer', search: 'Search', welcome: 'Welcome' };
-      const clean = (node: { children?: any[]; component?: string; selected?: number; name?: string; config?: { shellId?: string; autoStart?: boolean } }) => {
+      const clean = (node: { children?: any[]; component?: string; selected?: number; name?: string; config?: { path?: string } }) => {
         if (node.component && panelNames[node.component]) node.name = panelNames[node.component];
-        if (node.children) node.children = node.children.filter(n => n.component !== 'file' && n.component !== 'terminal');
+        if (node.children) node.children = node.children.filter(n => n.component !== 'terminal' && (n.component !== 'file' || restoredFiles?.has(n.config?.path)));
         if (node.selected !== undefined) node.selected = 0;
         node.children?.forEach(clean);
       };
@@ -85,6 +86,17 @@ export default function App() {
   const [searching, setSearching] = useState(false);
   const [position, setPosition] = useState({ line: 1, col: 1 });
   const [activeFile, setActiveFile] = useState('');
+  const [sessionReady, setSessionReady] = useState(false);
+  const [recoveryBlocked, setRecoveryBlocked] = useState('');
+  const [recoveryWarning, setRecoveryWarning] = useState('');
+  const [recoveryError, setRecoveryError] = useState('');
+  const [recoveryLocked, setRecoveryLocked] = useState(false);
+  const [checkpointTime, setCheckpointTime] = useState('');
+  const [layoutVersion, setLayoutVersion] = useState(0);
+  const [closing, setClosing] = useState(false);
+  const checkpointTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const sessionRef = useRef({ root, files, activeFile, model, sessionReady, recoveryLocked });
+  sessionRef.current = { root, files, activeFile, model, sessionReady, recoveryLocked };
   const allowClose = useRef(false);
   const opening = useRef(new Set<string>());
   const saving = useRef(new Set<string>());
@@ -92,6 +104,55 @@ export default function App() {
   const fileIndex = useRef<Promise<FileEntry[]> | null>(null);
 
   const notify = useCallback((message: string) => setNotice(message), []);
+  const snapshot = useCallback((): Session => {
+    const current = sessionRef.current;
+    return { version: 1, root: current.root, files: Object.values(current.files), activeFile: current.activeFile, layout: current.model.toJson() };
+  }, []);
+  const checkpoint = useCallback(async () => {
+    if (!sessionRef.current.sessionReady || sessionRef.current.recoveryLocked) return false;
+    try {
+      await saveSession(snapshot());
+      setRecoveryError(''); setCheckpointTime(checkpointTimer.current ? '' : new Date().toLocaleTimeString());
+      return true;
+    } catch (error) { setRecoveryError(`Recovery could not be saved: ${String(error)}. Save your files before closing.`); return false; }
+  }, [snapshot]);
+
+  const recoverSession = useCallback(async () => {
+    setSessionReady(false);
+    try {
+      const saved = await loadSession();
+      if (saved) {
+        let openedRoot = saved.root;
+        let blocked = '';
+        if (saved.root && native) {
+          try { openedRoot = await activateWorkspace(saved.root); }
+          catch (error) { blocked = `Could not reopen ${saved.root}: ${String(error)}. Recovered buffers are preserved; reopen the project before saving to disk.`; }
+        }
+        const restored = blocked ? { files: Object.fromEntries(saved.files.map(file => [file.path, file])), warnings: [], recovered: saved.files.filter(file => file.content !== file.saved).length } : await restoreFiles(saved.files);
+        const nextModel = loadLayout(saved.layout, new Set(Object.keys(restored.files)));
+        // Include buffers whose original docking group no longer exists.
+        for (const file of Object.values(restored.files)) {
+          if (!nextModel.getNodeById(`file:${file.path}`)) nextModel.doAction(Actions.addNode({ type: 'tab', id: `file:${file.path}`, name: file.name, component: 'file', config: { path: file.path } }, 'documents', DockLocation.CENTER, -1));
+        }
+        const selected = restored.files[saved.activeFile] ? saved.activeFile : Object.keys(restored.files)[0] || '';
+        if (selected) nextModel.doAction(Actions.selectTab(`file:${selected}`));
+        setRoot(openedRoot); setFiles(restored.files); setModel(nextModel); setActiveFile(selected);
+        setRecoveryBlocked(blocked); setRecoveryWarning(restored.warnings.join(' '));
+        setRecoveryLocked(false); setRecoveryError(''); setRefresh(value => value + 1);
+        if (restored.recovered) notify(`Recovered unsaved changes in ${restored.recovered} file(s).`);
+      }
+    } catch (error) { setRecoveryLocked(true); setRecoveryError(`Could not load recovery: ${String(error)}. Existing data has been preserved.`); }
+    finally { setSessionReady(true); }
+  }, [notify]);
+  useEffect(() => { void recoverSession(); }, [recoverSession]);
+  useEffect(() => {
+    if (!sessionReady || recoveryLocked) return;
+    setCheckpointTime('');
+    if (checkpointTimer.current) return;
+    // Throttle checkpoints so continuous typing is backed up too.
+    checkpointTimer.current = setTimeout(() => { checkpointTimer.current = undefined; void checkpoint(); }, 400);
+  }, [files, root, activeFile, model, layoutVersion, sessionReady, recoveryLocked, checkpoint]);
+  useEffect(() => () => { if (checkpointTimer.current) clearTimeout(checkpointTimer.current); }, []);
   useEffect(() => {
     let active = true;
     void loadShells().then(items => { if (active) setProfiles(items); }).catch(error => { if (active) notify(`Could not detect shells: ${String(error)}`); });
@@ -104,6 +165,7 @@ export default function App() {
   };
 
   const openFile = useCallback(async (path: string) => {
+    if (recoveryBlocked) { notify('Reopen the project before opening additional files.'); return; }
     const id = `file:${path}`;
     if (model.getNodeById(id)) { model.doAction(Actions.selectTab(id)); setActiveFile(path); return; }
     if (opening.current.has(path)) return;
@@ -118,9 +180,10 @@ export default function App() {
       setActiveFile(path);
     } catch (error) { notify(`Could not open file: ${String(error)}`); }
     finally { opening.current.delete(path); }
-  }, [model, notify]);
+  }, [model, notify, recoveryBlocked]);
 
   const saveFile = useCallback(async (path: string) => {
+    if (recoveryBlocked) { notify('Reopen the original project before saving recovered changes to disk.'); return; }
     const file = filesRef.current[path];
     if (!file || file.content === file.saved || saving.current.has(path)) return;
     saving.current.add(path);
@@ -132,7 +195,7 @@ export default function App() {
       notify(root ? `${file.name} saved.` : `${file.name} saved only in this demo session.`);
     } catch (error) { notify(`Could not save file: ${String(error)}`); }
     finally { saving.current.delete(path); }
-  }, [notify, root]);
+  }, [notify, root, recoveryBlocked]);
 
   const canDiscard = async () => {
     if (!Object.values(filesRef.current).some(file => file.content !== file.saved)) return true;
@@ -145,14 +208,17 @@ export default function App() {
     try {
       const selectedPath = await pickWorkspace();
       if (!selectedPath || !await canDiscard()) return;
+      if (recoveryLocked && !await confirmDialog('Replace the unreadable recovery snapshot with a new session?', { title: 'Start a new session', kind: 'warning' })) return;
       const selected = await activateWorkspace(selectedPath);
       generation.current += 1;
       setRoot(selected); setFiles({}); setActiveFile(''); setQuery(''); setMatches([]);
+      setRecoveryLocked(false); setRecoveryBlocked(''); setRecoveryWarning(''); setRecoveryError('');
       setModel(Model.fromJson(initialLayout())); setRefresh(value => value + 1);
     } catch (error) { notify(String(error)); }
   };
 
   const addTerminal = (shellId = 'powershell') => {
+    if (recoveryBlocked) { notify('Reopen the project before creating a terminal.'); return; }
     const profile = profiles.find(item => item.id === shellId);
     if (!profile?.available) { notify('This terminal is not installed or is still being detected.'); return; }
     const id = `terminal-${crypto.randomUUID()}`;
@@ -184,11 +250,17 @@ export default function App() {
 
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
-      if (Object.values(filesRef.current).some(file => file.content !== file.saved)) { event.preventDefault(); event.returnValue = ''; }
+      if (!sessionRef.current.sessionReady) return;
+      if (sessionRef.current.recoveryLocked) {
+        if (Object.values(filesRef.current).some(file => file.content !== file.saved)) { event.preventDefault(); event.returnValue = ''; }
+        return;
+      }
+      try { void saveSession(snapshot()).catch(error => setRecoveryError(String(error))); }
+      catch { event.preventDefault(); event.returnValue = ''; }
     };
     window.addEventListener('beforeunload', beforeUnload);
     return () => window.removeEventListener('beforeunload', beforeUnload);
-  }, []);
+  }, [snapshot]);
 
   useEffect(() => {
     if (!native) return;
@@ -197,12 +269,14 @@ export default function App() {
     void import('@tauri-apps/api/window').then(async ({ getCurrentWindow }) => {
       const stop = await getCurrentWindow().onCloseRequested(async event => {
         event.preventDefault();
-        if (await canDiscard()) await getCurrentWindow().destroy();
+        setClosing(true);
+        if (await checkpoint() || await confirmDialog('Recovery could not be saved. Close anyway? Unsaved changes may be lost.', { title: 'Recovery unavailable', kind: 'warning' })) await getCurrentWindow().destroy();
+        else setClosing(false);
       });
       if (cancelled) stop(); else dispose = stop;
     });
     return () => { cancelled = true; dispose?.(); };
-  }, []);
+  }, [checkpoint]);
 
   useEffect(() => {
     const handle = (event: KeyboardEvent) => {
@@ -247,7 +321,7 @@ export default function App() {
       case 'explorer': return <div className="explorer panel-scroll">
         <div className="panel-heading"><span>PROJECT FOLDER</span><div><button className="icon-button" title="Refresh files" onClick={() => setRefresh(value => value + 1)}><RefreshCw size={13} /></button><button className="icon-button" title="Open folder" onClick={() => void openFolder()}><FolderOpen size={15} /></button></div></div>
         <div className="project-heading"><ChevronDown size={13} /><span>{root ? fileName(root) : 'example-project'}</span>{!root && <span className="demo-badge">DEMO</span>}</div>
-        <Tree key={root ?? 'demo'} refresh={refresh} onOpen={path => void openFile(path)} />
+        {recoveryBlocked ? <p className="panel-description">Project unavailable. Recovered files remain open.</p> : <Tree key={root ?? 'demo'} refresh={refresh} onOpen={path => void openFile(path)} />}
         <button className="open-folder-link" onClick={() => void openFolder()}><FolderOpen size={14} /> Open another folder</button>
       </div>;
       case 'search': return <div className="search-panel panel-scroll"><div className="panel-heading">FIND FILES</div>
@@ -278,13 +352,22 @@ export default function App() {
       <button className="project-picker" onClick={() => void openFolder()}><Folder size={13} /><span>{root ? fileName(root) : 'No folder open'}</span><ChevronDown size={12} /></button>
       <button className="icon-button" title="Layout and shortcuts" onClick={() => setSettings(true)}><Settings2 size={16} /></button>
     </header>
+    {(recoveryBlocked || recoveryWarning || recoveryError) && <div className="recovery-banner" role="alert"><span>{recoveryBlocked || recoveryError || recoveryWarning}</span>
+      {recoveryBlocked && <button className="button" onClick={() => { void checkpoint().then(saved => { if (saved) void recoverSession(); }); }}>Retry recovery</button>}
+      {recoveryError && !recoveryLocked && !recoveryBlocked && <button className="button" onClick={() => void checkpoint()}>Retry backup</button>}
+      {recoveryLocked && <button className="button" onClick={async () => {
+        const accepted = native ? await confirmDialog('Replace the unreadable recovery snapshot? Existing recovery copies will be kept where possible.', { title: 'Start a new session', kind: 'warning' }) : window.confirm('Replace the unreadable recovery snapshot?');
+        if (accepted) { setRecoveryLocked(false); setRecoveryError(''); }
+      }}>Start a new session</button>}
+      {!recoveryBlocked && !recoveryError && <button className="icon-button" aria-label="Dismiss recovery warning" onClick={() => setRecoveryWarning('')}><X size={15} /></button>}
+    </div>}
     <div className="workspace"><aside className="activity-bar" aria-label="Navigation">
       <button title="Explorer" className="activity-button" onClick={() => model.doAction(Actions.selectTab('explorer'))}><Files size={21} /></button>
       <button title="Find files (Ctrl+P)" className="activity-button" onClick={() => { model.doAction(Actions.selectTab('search')); setTimeout(() => document.getElementById('file-search')?.focus(), 0); }}><Search size={21} /></button>
       <button title="New terminal" className="activity-button" onClick={openTerminalMenu}><TerminalSquare size={21} /></button>
       <div className="activity-spacer" /><button title="Settings" className="activity-button" onClick={() => setSettings(true)}><Settings2 size={21} /></button>
     </aside><main className="layout-host"><Layout model={model} factory={factory} onAction={onAction}
-      onModelChange={current => { persist(current); const active = current.getActiveTabset()?.getSelectedNode(); if (active instanceof TabNode && active.getComponent() === 'file') setActiveFile(active.getConfig().path); }}
+      onModelChange={current => { persist(current); setLayoutVersion(value => value + 1); const active = current.getActiveTabset()?.getSelectedNode(); if (active instanceof TabNode && active.getComponent() === 'file') setActiveFile(active.getConfig().path); }}
       onRenderTab={(node, values) => {
         const path = node.getConfig()?.path;
         const dirty = path && files[path]?.content !== files[path]?.saved;
@@ -292,7 +375,8 @@ export default function App() {
       }}
       onRenderTabSet={(node, values) => { if (node.getId() === 'terminals') values.buttons.push(<button key="new" className="icon-button" title="New terminal" aria-haspopup="menu" onClick={openTerminalMenu}><Plus size={14} /></button>); }}
     /></main></div>
-    <footer className="statusbar"><span className="status-indicator" />{native ? 'Local' : 'Web preview'}<span className="status-divider" /><span>{root ? fileName(root) : 'Demo project'}</span><div className="status-spacer" /><span>Ln {position.line}, Col {position.col}</span><span>UTF-8</span><span>{activeFile ? languageName(activeFile) : 'Leve'}</span></footer>
+    <footer className="statusbar"><span className="status-indicator" />{native ? 'Local' : 'Web preview'}<span className="status-divider" /><span>{root ? fileName(root) : 'Demo project'}</span><div className="status-spacer" /><span title={checkpointTime ? `Last recovery checkpoint: ${checkpointTime}` : 'Preparing recovery'}>{recoveryError || recoveryLocked ? 'Recovery unavailable' : checkpointTime ? 'Recovery saved' : 'Recovery pending'}</span><span>Ln {position.line}, Col {position.col}</span><span>UTF-8</span><span>{activeFile ? languageName(activeFile) : 'Leve'}</span></footer>
+    {(!sessionReady || closing) && <div className="session-loading" role="status">{closing ? 'Saving session…' : 'Restoring session…'}</div>}
     {notice && <div className="toast" role="status"><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={15} /></button></div>}
     {terminalMenu && <div className="terminal-menu-backdrop" onClick={() => setTerminalMenu(null)} onKeyDown={event => { if (event.key === 'Escape') setTerminalMenu(null); }}>
       <div className="terminal-menu" role="menu" aria-label="New terminal" style={terminalMenu} onClick={event => event.stopPropagation()}>
