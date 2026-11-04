@@ -1685,6 +1685,7 @@ version = "0.1.0"
 dependencies = [
  "dunce",
  "portable-pty",
+ "regex",
  "serde",
  "serde_json",
  "tauri",

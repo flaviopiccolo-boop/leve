@@ -1,16 +1,23 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { Actions, DockLocation, Layout, Model, TabNode, type Action, type IJsonModel } from 'flexlayout-react';
-import { Blocks, ChevronDown, ChevronRight, Code2, FileCode2, Files, Folder, FolderOpen, Keyboard, LayoutTemplate, Plus, RefreshCw, Search, Settings2, TerminalSquare, X } from 'lucide-react';
+import { Blocks, ChevronDown, Code2, FileCode2, Files, Folder, FolderOpen, Keyboard, LayoutTemplate, Plus, Search, Settings2, TerminalSquare, X } from 'lucide-react';
 import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import { useTheme } from './theme';
 import { loadShells, previewShells, type ShellProfile } from './shells';
 import { loadSession, restoreFiles, saveSession, type Session } from './session';
 import { loadProjects, rememberProject, sameProject } from './projects';
-import { activateWorkspace, fileName, indexFiles, languageName, listFiles, native, pickWorkspace, readFile, writeFile, type FileEntry, type OpenFile } from './workspace';
+import Explorer, { FileDialog } from './Explorer';
+import ContentSearch from './ContentSearch';
+import { activateWorkspace, fileName, indexFiles, languageName, mutateEntry, native, pickWorkspace, readFile, withinEntry, writeFile, type ContentMatch, type FileEntry, type FileOperation, type OpenFile } from './workspace';
 
 const LAYOUT_KEY = 'leve.layout.v1';
 const Editor = lazy(() => import('./Editor'));
 const Terminal = lazy(() => import('./Terminal'));
+function fileTab(model: Model, path: string): TabNode | undefined {
+  let found: TabNode | undefined;
+  model.visitNodes(node => { if (node instanceof TabNode && node.getComponent() === 'file' && node.getConfig()?.path === path) found = node; });
+  return found;
+}
 const initialLayout = (): IJsonModel => ({
   global: { tabEnableRename: false, tabSetEnableClose: false, tabSetMinWidth: 170, tabSetMinHeight: 100, tabSetEnableMaximize: true },
   borders: [],
@@ -49,32 +56,15 @@ function loadLayout(savedLayout?: IJsonModel, restoredFiles?: Set<string>) {
   return Model.fromJson(initialLayout());
 }
 
-function Tree({ path = '', depth = 0, refresh, onOpen }: { path?: string; depth?: number; refresh: number; onOpen: (path: string) => void }) {
-  const [entries, setEntries] = useState<FileEntry[]>([]);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set(['src']));
-  const [error, setError] = useState('');
-  useEffect(() => {
-    let active = true;
-    setError('');
-    void listFiles(path).then(items => { if (active) setEntries(items); }).catch(err => { if (active) setError(String(err)); });
-    return () => { active = false; };
-  }, [path, refresh]);
-  return <>{error && <p className="inline-error">{error}</p>}{entries.map(entry => <div key={entry.path}>
-    <button className="tree-item" style={{ paddingLeft: 12 + depth * 15 }} title={entry.path} aria-expanded={entry.directory ? expanded.has(entry.path) : undefined} onClick={() => {
-      if (!entry.directory) onOpen(entry.path);
-      else setExpanded(previous => { const next = new Set(previous); if (next.has(entry.path)) next.delete(entry.path); else next.add(entry.path); return next; });
-    }}>
-      {entry.directory ? <>{expanded.has(entry.path) ? <ChevronDown size={12} /> : <ChevronRight size={12} />}<Folder size={15} className="folder-icon" /></> : <><span className="tree-spacer" /><FileCode2 size={14} className={entry.name.endsWith('.py') ? 'python-icon' : 'file-icon'} /></>}
-      <span>{entry.name}</span>
-    </button>
-    {entry.directory && expanded.has(entry.path) && <Tree path={entry.path} depth={depth + 1} refresh={refresh} onOpen={onOpen} />}
-  </div>)}</>;
-}
-
 export default function App() {
   const { theme, setTheme } = useTheme();
   const [model, setModel] = useState(loadLayout);
   const [root, setRoot] = useState<string | null>(null);
+  const [fileOperation, setFileOperation] = useState<FileOperation | null>(null);
+  const [fileError, setFileError] = useState('');
+  const [fileBusy, setFileBusy] = useState(false);
+  const fileBusyRef = useRef(false);
+  const [reveal, setReveal] = useState('');
   const [files, setFiles] = useState<Record<string, OpenFile>>({});
   const filesRef = useRef(files); filesRef.current = files;
   const [refresh, setRefresh] = useState(0);
@@ -89,6 +79,8 @@ export default function App() {
   const [query, setQuery] = useState('');
   const [matches, setMatches] = useState<FileEntry[]>([]);
   const [searching, setSearching] = useState(false);
+  const [searchMode, setSearchMode] = useState<'files' | 'contents'>('files');
+  const [jump, setJump] = useState<(ContentMatch & { token: string }) | null>(null);
   const [position, setPosition] = useState({ line: 1, col: 1 });
   const [activeFile, setActiveFile] = useState('');
   const [sessionReady, setSessionReady] = useState(false);
@@ -141,10 +133,10 @@ export default function App() {
         const nextModel = loadLayout(saved.layout, new Set(Object.keys(restored.files)));
         // Include buffers whose original docking group no longer exists.
         for (const file of Object.values(restored.files)) {
-          if (!nextModel.getNodeById(`file:${file.path}`)) nextModel.doAction(Actions.addNode({ type: 'tab', id: `file:${file.path}`, name: file.name, component: 'file', config: { path: file.path } }, 'documents', DockLocation.CENTER, -1));
+          if (!fileTab(nextModel, file.path)) nextModel.doAction(Actions.addNode({ type: 'tab', id: `file:${file.path}`, name: file.name, component: 'file', config: { path: file.path } }, 'documents', DockLocation.CENTER, -1));
         }
         const selected = restored.files[saved.activeFile] ? saved.activeFile : Object.keys(restored.files)[0] || '';
-        if (selected) nextModel.doAction(Actions.selectTab(`file:${selected}`));
+        if (selected) nextModel.doAction(Actions.selectTab(fileTab(nextModel, selected)!.getId()));
         setRoot(openedRoot); setFiles(restored.files); setModel(nextModel); setActiveFile(selected);
         if (openedRoot && !blocked) remember(openedRoot);
         setRecoveryBlocked(blocked); setRecoveryWarning(restored.warnings.join(' '));
@@ -175,9 +167,11 @@ export default function App() {
   };
 
   const openFile = useCallback(async (path: string) => {
+    if (fileBusyRef.current) return;
     if (recoveryBlocked) { notify('Reopen the project before opening additional files.'); return; }
-    const id = `file:${path}`;
-    if (model.getNodeById(id)) { model.doAction(Actions.selectTab(id)); setActiveFile(path); return; }
+    const id = `file:${crypto.randomUUID()}`;
+    const existing = fileTab(model, path);
+    if (existing) { model.doAction(Actions.selectTab(existing.getId())); setActiveFile(path); return; }
     if (opening.current.has(path)) return;
     opening.current.add(path);
     const currentGeneration = generation.current;
@@ -193,6 +187,7 @@ export default function App() {
   }, [model, notify, recoveryBlocked]);
 
   const saveFile = useCallback(async (path: string) => {
+    if (fileBusyRef.current) return;
     if (recoveryBlocked) { notify('Reopen the original project before saving recovered changes to disk.'); return; }
     const file = filesRef.current[path];
     if (!file || file.content === file.saved || saving.current.has(path)) return;
@@ -207,6 +202,40 @@ export default function App() {
     finally { saving.current.delete(path); }
   }, [notify, root, recoveryBlocked]);
 
+  const applyFileOperation = async (name: string) => {
+    if (!fileOperation || fileBusyRef.current) return;
+    if (saving.current.size || opening.current.size) { setFileError('Wait for pending file operations to finish, then try again.'); return; }
+    fileBusyRef.current = true; setFileBusy(true); setFileError('');
+    try {
+      const target = await mutateEntry(fileOperation, name, root);
+      generation.current += 1;
+      if ('entry' in fileOperation) {
+        const source = fileOperation.entry.path;
+        const updated = { ...filesRef.current };
+        const affected = Object.keys(updated).filter(path => withinEntry(path, source));
+        for (const path of affected) {
+          const tab = fileTab(model, path);
+          const file = updated[path]; delete updated[path];
+          if (fileOperation.kind === 'rename') {
+            const renamed = target + path.slice(source.length);
+            updated[renamed] = { ...file, path: renamed, name: fileName(renamed) };
+            if (tab) model.doAction(Actions.updateNodeAttributes(tab.getId(), { name: fileName(renamed), config: { path: renamed } }));
+          } else if (tab) model.doAction(Actions.deleteTab(tab.getId()));
+        }
+        filesRef.current = updated; setFiles(updated);
+        if (withinEntry(activeFile, source)) setActiveFile(fileOperation.kind === 'rename' ? target + activeFile.slice(source.length) : '');
+      }
+      setQuery(''); setMatches([]); setRefresh(value => value + 1); setReveal(target);
+      setFileOperation(null);
+      notify(fileOperation.kind === 'delete' ? 'Deleted permanently.' : fileOperation.kind === 'rename' ? 'Renamed. Unsaved edits were preserved.' : 'Created.');
+      if (fileOperation.kind === 'file') {
+        fileBusyRef.current = false;
+        await openFile(target);
+      }
+    } catch (error) { setFileError(String(error)); setRefresh(value => value + 1); }
+    finally { fileBusyRef.current = false; setFileBusy(false); }
+  };
+
   const canDiscard = async () => {
     if (!Object.values(filesRef.current).some(file => file.content !== file.saved)) return true;
     const message = 'You have unsaved changes. Discard them?';
@@ -214,6 +243,7 @@ export default function App() {
   };
 
   const openFolder = async (recentPath?: string) => {
+    if (fileBusyRef.current) return;
     setProjectMenu(false);
     if (switchingProject) return;
     if (recentPath && root && sameProject(recentPath, root) && !recoveryBlocked) return;
@@ -300,8 +330,13 @@ export default function App() {
       if (!(event.ctrlKey || event.metaKey)) return;
       if (event.key.toLowerCase() === 's') { event.preventDefault(); if (activeFile) void saveFile(activeFile); }
       if (event.key.toLowerCase() === 'p') {
+        setSearchMode('files');
         event.preventDefault(); model.doAction(Actions.selectTab('search'));
         setTimeout(() => document.getElementById('file-search')?.focus(), 0);
+      }
+      if (event.shiftKey && event.key.toLowerCase() === 'f') {
+        event.preventDefault(); setSearchMode('contents'); model.doAction(Actions.selectTab('search'));
+        setTimeout(() => document.getElementById('content-search')?.focus(), 0);
       }
       if (event.key === '`') { event.preventDefault(); addTerminal(); }
     };
@@ -334,21 +369,18 @@ export default function App() {
 
   const factory = (node: TabNode): ReactNode => {
     switch (node.getComponent()) {
-      case 'explorer': return <div className="explorer panel-scroll">
-        <div className="panel-heading"><span>PROJECT FOLDER</span><div><button className="icon-button" title="Refresh files" onClick={() => setRefresh(value => value + 1)}><RefreshCw size={13} /></button><button className="icon-button" title="Open folder" onClick={() => void openFolder()}><FolderOpen size={15} /></button></div></div>
-        <div className="project-heading"><ChevronDown size={13} /><span>{root ? fileName(root) : 'example-project'}</span>{!root && <span className="demo-badge">DEMO</span>}</div>
-        {recoveryBlocked ? <p className="panel-description">Project unavailable. Recovered files remain open.</p> : <Tree key={root ?? 'demo'} refresh={refresh} onOpen={path => void openFile(path)} />}
-        <button className="open-folder-link" onClick={() => void openFolder()}><FolderOpen size={14} /> Open another folder</button>
-      </div>;
-      case 'search': return <div className="search-panel panel-scroll"><div className="panel-heading">FIND FILES</div>
+      case 'explorer': return <Explorer root={root} blocked={!!recoveryBlocked} refresh={refresh} reveal={reveal} onRefresh={() => setRefresh(value => value + 1)} onOpen={path => void openFile(path)} onFolder={() => void openFolder()} onOperation={operation => { setFileOperation(operation); setFileError(''); }} />;
+      case 'search': return <div className="search-panel panel-scroll"><div className="panel-heading">SEARCH</div>
+        <div className="search-modes" role="tablist" aria-label="Search mode"><button role="tab" aria-selected={searchMode === 'files'} onClick={() => setSearchMode('files')}>Files</button><button role="tab" aria-selected={searchMode === 'contents'} onClick={() => setSearchMode('contents')}>Contents</button></div>
+        {searchMode === 'contents' ? <ContentSearch root={root} blocked={!!recoveryBlocked || (native && !root)} refresh={refresh} onOpen={match => { void openFile(match.path).then(() => setJump({ ...match, token: crypto.randomUUID() })); }} /> : <>
         <label className="search-input"><Search size={14} /><input id="file-search" value={query} onChange={event => setQuery(event.target.value)} placeholder="File name or path" /></label>
         <p className="panel-description">{searching ? 'Searching…' : query ? `${matches.length} result(s)` : 'Find files in your project. Use Ctrl+F to search within the code.'}</p>
         {matches.map(entry => <button className="search-result" key={entry.path} onClick={() => void openFile(entry.path)}><FileCode2 size={14} /><span>{entry.name}<small>{entry.path}</small></span></button>)}
         {query && <p className="panel-description">Up to 5,000 files · skips dependencies and build folders.</p>}
-      </div>;
+      </>}</div>;
       case 'file': {
         const file = files[node.getConfig().path];
-        return file ? <Suspense fallback={<p className="panel-description">Loading editor…</p>}><Editor file={file} onChange={(path, content) => setFiles(previous => ({ ...previous, [path]: { ...previous[path], content } }))} onSave={path => void saveFile(path)} onCursor={(line, col) => setPosition({ line, col })} /></Suspense> : null;
+        return file ? <Suspense fallback={<p className="panel-description">Loading editor…</p>}><Editor file={file} jump={jump?.path === file.path ? jump : null} onJumpError={() => notify('This search result no longer matches the open file. Save or reopen the file, then search again.')} onChange={(path, content) => setFiles(previous => ({ ...previous, [path]: { ...previous[path], content } }))} onSave={path => void saveFile(path)} onCursor={(line, col) => setPosition({ line, col })} /></Suspense> : null;
       }
       case 'terminal': return <Suspense fallback={null}><Terminal id={node.getId()} shellId={node.getConfig()?.shellId} /></Suspense>;
       default: return <div className="welcome panel-scroll"><div className="welcome-content">
@@ -394,6 +426,7 @@ export default function App() {
     <footer className="statusbar"><span className="status-indicator" />{native ? 'Local' : 'Web preview'}<span className="status-divider" /><span>{root ? fileName(root) : 'Demo project'}</span><div className="status-spacer" /><span title={checkpointTime ? `Last recovery checkpoint: ${checkpointTime}` : 'Preparing recovery'}>{recoveryError || recoveryLocked ? 'Recovery unavailable' : checkpointTime ? 'Recovery saved' : 'Recovery pending'}</span><span>Ln {position.line}, Col {position.col}</span><span>UTF-8</span><span>{activeFile ? languageName(activeFile) : 'Leve'}</span></footer>
     {(!sessionReady || closing) && <div className="session-loading" role="status">{closing ? 'Saving session…' : 'Restoring session…'}</div>}
     {notice && <div className="toast" role="status"><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={15} /></button></div>}
+    {fileOperation && <FileDialog key={JSON.stringify(fileOperation)} operation={fileOperation} dirtyCount={'entry' in fileOperation ? Object.values(files).filter(file => withinEntry(file.path, fileOperation.entry.path) && file.content !== file.saved).length : 0} busy={fileBusy} error={fileError} onCancel={() => { if (!fileBusy) setFileOperation(null); }} onSubmit={name => void applyFileOperation(name)} />}
     {projectMenu && <div className="project-menu-backdrop" onClick={() => { setProjectMenu(false); projectPicker.current?.focus(); }}>
       <div id="project-menu" className="project-menu" role="menu" aria-label="Recent projects" onClick={event => event.stopPropagation()} onKeyDown={event => {
         const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'));
@@ -431,6 +464,7 @@ export default function App() {
         setModel(fresh); persist(fresh); setSettings(false);
       }}><LayoutTemplate size={16} /> Reset layout</button>
       <div className="settings-shortcuts"><Keyboard size={17} /><span>Ctrl+P · Find file<br />Ctrl+S · Save<br />Ctrl+F · Search in code<br />Ctrl+` · New terminal</span></div>
+      <p className="subtle">Ctrl+Shift+F · Search project contents</p>
       <p className="subtle">Resetting the layout closes open terminal sessions. Files and editor changes are preserved.</p>
     </section></div>}
   </div>;

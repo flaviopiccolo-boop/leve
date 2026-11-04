@@ -52,6 +52,18 @@ Native Windows file drag-and-drop is disabled in the WebView to allow HTML panel
 - Dark and light themes under **Settings → Appearance**, applied immediately to panels, the editor, and open terminals. The preference is saved locally; switching themes preserves editor history and terminal sessions.
 - Last-project and open-file recovery, including the active file, panel arrangement, and unsaved buffers. Terminal tabs remain empty at startup.
 - Project switcher in the title bar with persistent recent-folder history, most recently opened first. Each entry shows its full path to distinguish folders with the same name. **Open another folder…** opens the folder dialog. Switching projects checks for unsaved changes; unavailable folders keep the current project open.
+- Explorer file and folder creation, renaming, and confirmed permanent deletion, with open-buffer updates and workspace path checks.
+- Project-wide literal content search, optional case-sensitive matching, cancellation, and clickable results with editor selection.
+
+## File management and project search
+
+Use **New file** or **New folder** in the explorer header to create an entry at the project root. Right-click an entry, or use its **…** button, to rename or delete it. Folder menus also create files and subfolders inside that folder. New files open immediately; new folders and their parents are revealed in the tree.
+
+Renaming a file or folder updates affected open tabs and keeps unsaved edits and their disk baselines. The editor is recreated for a renamed path, so its undo history resets. Deleting an entry requires explicit confirmation, warns about affected unsaved buffers, permanently removes the disk entry, and closes affected tabs. Deletion does not use the Recycle Bin. Duplicate names never overwrite existing entries. Mutations reject paths outside the project, reserved Windows names, links/junctions, and changes to the project root. Folder deletion preflights up to 100,000 entries and 100 levels; larger or linked trees must be handled in Windows Explorer. Filesystem operations are not transactional against concurrent external filesystem changes; a failed recursive deletion may have removed some entries, so buffers are retained and the tree refreshes on error.
+
+Press **Ctrl+Shift+F**, or choose **Search → Contents**, to search saved project files. **Match case** toggles case-sensitive matching. Results show path, line, column, and a text preview. Clicking opens the file and selects the match. If an open buffer has changed at that location, Leve keeps the buffer and asks you to save or reopen it and search again. **Search again** refreshes after disk changes. **Ctrl+P** continues to find file names and paths.
+
+Native content searches run on a background worker and cancel when the query changes or the panel closes. Limits are 500 results, 5,000 files, 20,000 visited entries, 64 MB read, five seconds, 15 directory levels, and 1 MB per file. Reaching a budget produces an explicit partial-results notice. Binary, non-UTF-8, inaccessible, and linked entries are skipped. Common dependency and build folders are excluded (`.git`, `node_modules`, `target`, `.venv`, `venv`, `__pycache__`, `dist`, `build`, `.next`, `.idea`); `.gitignore` rules are not parsed. Searches use literal text of 1–256 characters on a single line. Save edits before searching. The browser demo supports file management and search in memory; these filesystem changes reset on reload.
 
 ## Session recovery
 
@@ -67,8 +79,8 @@ The status bar shows **Recovery pending**, **Recovery saved**, or **Recovery una
 
 - Automated tests cover the web interface and backend operations. Rust tests include a real PowerShell/ConPTY session with UTF-8 output and a batch file running in a folder with spaces and non-ASCII characters. The complete desktop UI flow still requires manual validation.
 - UTF-8 text files up to 4 MB. Editing may normalize line endings to LF. Binary files are rejected.
-- No file creation, renaming, or deletion; Git integration; LSP; debugging; project-aware autocomplete; extensions; or automatic updates.
-- Sidebar search finds file names and paths. Use Ctrl+F to search the contents of the active file.
+- No Git integration, LSP, debugging, project-aware autocomplete, extensions, or automatic updates. See the roadmap for the Python LSP integration assessment.
+- Project content search covers saved files with the documented exclusions and limits. Use Ctrl+F to search the active buffer, including unsaved edits.
 - No automatic filesystem watching. Refresh the tree manually. A save conflict requires copying your changes and reopening the file.
 - Recovery restores the most recent completed checkpoint; it is not a substitute for saving project files or version control.
 - Conflict detection is not a transactional lock against another process writing at the same instant.
@@ -81,7 +93,7 @@ npm run build
 npm test
 ```
 
-The browser tests use the installed Google Chrome by default. Set `LEVE_TEST_BROWSER` to another Playwright channel, such as `msedge`, to override it. Tests cover the editor, layouts, themes, terminal creation, and recovery after interruption, external edits, unavailable projects, and invalid snapshots. Screenshots are written to `artifacts/`.
+The browser tests use the installed Google Chrome by default. Set `LEVE_TEST_BROWSER` to another Playwright channel, such as `msedge`, to override it. Tests cover the editor, layouts, themes, terminal creation, file-management dialogs and buffer updates, project-search navigation and cancellation, and recovery after interruption, external edits, unavailable projects, and invalid snapshots. Native tests cover real filesystem mutations, collision and traversal protection, junction rejection, Unicode search positions, search budgets/exclusions, recovery, and real PTY sessions. Screenshots are written to `artifacts/`.
 
 With Rust configured:
 
@@ -112,6 +124,8 @@ The configuration targets an NSIS installer. Installer generation and behavior s
 
 - `src/App.tsx`: application shell, docking, navigation, and file state.
 - `src/Editor.tsx`: CodeMirror integration and language loading.
+- `src/Explorer.tsx`: file tree, entry menus, and mutation dialogs.
+- `src/ContentSearch.tsx`: cancellable project content search UI.
 - `src/Terminal.tsx`: terminal frontend and Rust communication.
 - `src/shells.ts`: terminal profile types and preview data.
 - `src/workspace.ts`: workspace access and browser demo.
@@ -119,6 +133,8 @@ The configuration targets an NSIS installer. Installer generation and behavior s
 - `src-tauri/src/main.rs`: local operations, saving, and PTY sessions.
 - `src-tauri/src/shells.rs`: installed-shell discovery and launch configuration.
 - `src-tauri/src/session.rs`: bounded, atomic recovery snapshots and fallback storage.
+- `src-tauri/src/files.rs`: scoped create, rename, and permanent-delete operations.
+- `src-tauri/src/search.rs`: bounded background content search.
 - `tests/editor.spec.ts`: browser integration tests.
 
 See the [product roadmap and to-do list](TODO.md) for the six recommended priorities and their completion status.

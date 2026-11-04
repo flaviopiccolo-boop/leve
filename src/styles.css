@@ -133,6 +133,16 @@ button { border: 0; }
 .tree-item { display: flex; align-items: center; gap: 7px; width: 100%; height: 29px; text-align: left; background: transparent; font-size: 11px; padding-right: 12px; }
 .tree-item > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tree-item:hover { background: var(--hover); color: var(--strong); }
+.tree-row { display: flex; align-items: center; }
+.tree-row:hover, .tree-row:focus-within { background: var(--hover); }
+.tree-row .tree-item { min-width: 0; flex: 1; }
+.tree-more { flex-shrink: 0; margin-right: 5px; opacity: 0; }
+.tree-row:hover .tree-more, .tree-row:focus-within .tree-more { opacity: 1; }
+.file-menu { width: 200px; }
+.file-name-label { display: grid; gap: 8px; font-size: 12px; }
+.file-name-label input { border: 1px solid var(--border); border-radius: 4px; padding: 10px; color: var(--text); background: var(--input); }
+.file-dialog .file-path { overflow-wrap: anywhere; }
+.file-dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 .tree-spacer { width: 12px; flex-shrink: 0; }
 .folder-icon { color: var(--muted); flex-shrink: 0; }
 .file-icon { color: var(--muted); flex-shrink: 0; }
@@ -145,6 +155,13 @@ button { border: 0; }
 .search-result { display: flex; align-items: center; gap: 9px; background: transparent; width: 100%; padding: 8px 15px; text-align: left; font-size: 11px; }
 .search-result:hover { background: var(--hover); }
 .search-result small { display: block; margin-top: 4px; color: var(--muted); overflow-wrap: anywhere; }
+.search-modes { display: flex; gap: 5px; margin: 0 12px 12px; }
+.search-modes button { flex: 1; background: var(--panel); padding: 8px; border: 1px solid var(--border); border-radius: 4px; font-size: 11px; }
+.search-modes button[aria-selected="true"] { border-color: var(--accent); color: var(--accent); }
+.search-options { display: flex; justify-content: space-between; align-items: center; margin: 8px 12px; font-size: 11px; color: var(--muted); }
+.search-options label { display: flex; align-items: center; gap: 5px; }
+.content-result strong { font-size: 10px; font-weight: 500; color: var(--accent); overflow-wrap: anywhere; }
+.content-result small { font-family: Consolas, monospace; white-space: pre-wrap; word-break: break-word; line-height: 1.6; }
 .welcome { position: relative; display: flex; align-items: center; justify-content: center; background: radial-gradient(ellipse at 55% 35%, var(--welcome-glow), transparent 65%), var(--panel); }
 .welcome-content { width: 380px; max-width: calc(100% - 60px); padding: 32px 0 55px; }
 .brand-mark { width: 63px; height: 63px; display: grid; place-items: center; background: var(--accent-tint); border: 1px solid var(--accent-border); border-radius: 17px; color: var(--accent); margin-bottom: 27px; }

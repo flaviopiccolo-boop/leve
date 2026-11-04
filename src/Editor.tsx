@@ -4,7 +4,7 @@ import { Compartment, EditorState } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
-import { languageName, type OpenFile } from './workspace';
+import { languageName, type ContentMatch, type OpenFile } from './workspace';
 import { useTheme, type Theme } from './theme';
 
 const editorTheme = (mode: Theme) => EditorView.theme({
@@ -44,8 +44,9 @@ async function loadLanguage(path: string) {
   }
 }
 
-export default function Editor({ file, onChange, onSave, onCursor }: {
+export default function Editor({ file, jump, onJumpError, onChange, onSave, onCursor }: {
   file: OpenFile; onChange: (path: string, value: string) => void;
+  jump?: (ContentMatch & { token: string }) | null; onJumpError?: () => void;
   onSave: (path: string) => void; onCursor: (line: number, col: number) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
@@ -53,6 +54,23 @@ export default function Editor({ file, onChange, onSave, onCursor }: {
   const themeRef = useRef(theme); themeRef.current = theme;
   const appearance = useRef(new Compartment());
   const editor = useRef<EditorView | undefined>(undefined);
+  const jumpRef = useRef(jump); jumpRef.current = jump;
+  const jumpError = useRef(onJumpError); jumpError.current = onJumpError;
+  const appliedJump = useRef('');
+  const applyJump = (view: EditorView) => {
+    const target = jumpRef.current;
+    if (!target || appliedJump.current === target.token) return;
+    appliedJump.current = target.token;
+    const doc = view.state.doc;
+    if (target.line > doc.lines) { jumpError.current?.(); return; }
+    const line = doc.line(target.line);
+    const from = line.from + target.column - 1;
+    const to = from + target.length;
+    if (from > line.to || to > line.to || doc.sliceString(from, to) !== target.matchedText) { jumpError.current?.(); return; }
+    view.dispatch({ selection: { anchor: from, head: to }, effects: EditorView.scrollIntoView(from, { y: 'center' }) });
+    view.focus();
+  };
+  useEffect(() => { if (editor.current) applyJump(editor.current); }, [jump]);
   useEffect(() => {
     editor.current?.dispatch({ effects: appearance.current.reconfigure(editorTheme(theme)) });
   }, [theme]);
@@ -79,6 +97,7 @@ export default function Editor({ file, onChange, onSave, onCursor }: {
         ] }),
       });
       editor.current = view;
+      applyJump(view);
     });
     return () => { disposed = true; view?.destroy(); editor.current = undefined; };
     // Preserve the editor and undo history as its document changes.
