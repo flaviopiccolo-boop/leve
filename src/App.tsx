@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNod
 import { Actions, DockLocation, Layout, Model, TabNode, type Action, type IJsonModel } from 'flexlayout-react';
 import { Blocks, ChevronDown, ChevronRight, Code2, FileCode2, Files, Folder, FolderOpen, Keyboard, LayoutTemplate, Plus, RefreshCw, Search, Settings2, TerminalSquare, X } from 'lucide-react';
 import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
+import { useTheme } from './theme';
 import { activateWorkspace, fileName, indexFiles, languageName, listFiles, native, pickWorkspace, readFile, writeFile, type FileEntry, type OpenFile } from './workspace';
 
 const LAYOUT_KEY = 'leve.layout.v1';
@@ -70,6 +71,7 @@ function Tree({ path = '', depth = 0, refresh, onOpen }: { path?: string; depth?
 }
 
 export default function App() {
+  const { theme, setTheme } = useTheme();
   const [model, setModel] = useState(loadLayout);
   const [root, setRoot] = useState<string | null>(null);
   const [files, setFiles] = useState<Record<string, OpenFile>>({});
@@ -278,6 +280,10 @@ export default function App() {
     {notice && <div className="toast" role="status"><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={15} /></button></div>}
     {settings && <div className="modal-backdrop" onClick={() => setSettings(false)}><section className="settings-modal" role="dialog" aria-modal="true" aria-label="Layout and shortcuts" onClick={event => event.stopPropagation()}>
       <div className="modal-heading"><h2>Your workspace</h2><button className="icon-button" aria-label="Close settings" onClick={() => setSettings(false)}><X size={18} /></button></div>
+      <fieldset className="theme-picker"><legend>Appearance</legend><div className="theme-options">
+        <label className={theme === 'dark' ? 'theme-option selected' : 'theme-option'}><input type="radio" name="theme" value="dark" checked={theme === 'dark'} onChange={() => setTheme('dark')} /><span>Dark</span></label>
+        <label className={theme === 'light' ? 'theme-option selected' : 'theme-option'}><input type="radio" name="theme" value="light" checked={theme === 'light'} onChange={() => setTheme('light')} /><span>Light</span></label>
+      </div><p>Your preference is saved automatically.</p></fieldset>
       <p>Drag tabs to move panels. Drop at the edges to split the area, or onto another group to combine tabs.</p>
       <button className="button" onClick={() => {
         const fresh = Model.fromJson(initialLayout());

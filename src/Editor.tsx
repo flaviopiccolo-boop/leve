@@ -1,33 +1,34 @@
 import { useEffect, useRef } from 'react';
 import { basicSetup } from 'codemirror';
-import { EditorState } from '@codemirror/state';
+import { Compartment, EditorState } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
 import { languageName, type OpenFile } from './workspace';
+import { useTheme, type Theme } from './theme';
 
-const theme = EditorView.theme({
-  '&': { height: '100%', backgroundColor: '#20242b', color: '#d4d9e2', fontSize: '13px' },
+const editorTheme = (mode: Theme) => EditorView.theme({
+  '&': { height: '100%', backgroundColor: 'var(--panel)', color: 'var(--text)', fontSize: '13px' },
   '.cm-scroller': { fontFamily: '"Cascadia Code", Consolas, monospace', lineHeight: '1.8' },
-  '.cm-content': { padding: '18px 0', caretColor: '#9bbcff' },
-  '.cm-gutters': { backgroundColor: '#20242b', color: '#657080', border: 'none', minWidth: '54px' },
-  '.cm-activeLine, .cm-activeLineGutter': { backgroundColor: '#272d36' },
-  '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': { backgroundColor: '#354967' },
-  '.cm-cursor': { borderLeftColor: '#a9c7ff' },
+  '.cm-content': { padding: '18px 0', caretColor: 'var(--accent)' },
+  '.cm-gutters': { backgroundColor: 'var(--panel)', color: 'var(--gutter)', border: 'none', minWidth: '54px' },
+  '.cm-activeLine, .cm-activeLineGutter': { backgroundColor: 'var(--active-line)' },
+  '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': { backgroundColor: 'var(--selection)' },
+  '.cm-cursor': { borderLeftColor: 'var(--accent)' },
   '&.cm-focused': { outline: 'none' },
-  '.cm-panels': { backgroundColor: '#252b34', color: '#d4d9e2' },
-}, { dark: true });
+  '.cm-panels': { backgroundColor: 'var(--chrome)', color: 'var(--text)' },
+}, { dark: mode === 'dark' });
 
 const highlighting = HighlightStyle.define([
-  { tag: tags.keyword, color: '#c5a3e6' },
-  { tag: tags.string, color: '#a4c89d' },
-  { tag: [tags.number, tags.bool, tags.null], color: '#dfbd8c' },
-  { tag: tags.comment, color: '#7c8d9f', fontStyle: 'italic' },
-  { tag: tags.function(tags.variableName), color: '#9ebfeb' },
-  { tag: tags.typeName, color: '#9fcac5' },
-  { tag: tags.propertyName, color: '#b0c8df' },
-  { tag: tags.operator, color: '#a8b7ce' },
-  { tag: tags.heading, color: '#b4cdf4', fontWeight: '600' },
+  { tag: tags.keyword, color: 'var(--syntax-keyword)' },
+  { tag: tags.string, color: 'var(--syntax-string)' },
+  { tag: [tags.number, tags.bool, tags.null], color: 'var(--syntax-number)' },
+  { tag: tags.comment, color: 'var(--syntax-comment)', fontStyle: 'italic' },
+  { tag: tags.function(tags.variableName), color: 'var(--syntax-function)' },
+  { tag: tags.typeName, color: 'var(--syntax-type)' },
+  { tag: tags.propertyName, color: 'var(--syntax-property)' },
+  { tag: tags.operator, color: 'var(--text)' },
+  { tag: tags.heading, color: 'var(--accent)', fontWeight: '600' },
 ]);
 
 async function loadLanguage(path: string) {
@@ -48,6 +49,13 @@ export default function Editor({ file, onChange, onSave, onCursor }: {
   onSave: (path: string) => void; onCursor: (line: number, col: number) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
+  const { theme } = useTheme();
+  const themeRef = useRef(theme); themeRef.current = theme;
+  const appearance = useRef(new Compartment());
+  const editor = useRef<EditorView | undefined>(undefined);
+  useEffect(() => {
+    editor.current?.dispatch({ effects: appearance.current.reconfigure(editorTheme(theme)) });
+  }, [theme]);
   const callbacks = useRef({ onChange, onSave, onCursor });
   callbacks.current = { onChange, onSave, onCursor };
   useEffect(() => {
@@ -58,7 +66,7 @@ export default function Editor({ file, onChange, onSave, onCursor }: {
       view = new EditorView({
         parent: host.current,
         state: EditorState.create({ doc: file.content, extensions: [
-          basicSetup, theme, syntaxHighlighting(highlighting), language,
+          basicSetup, appearance.current.of(editorTheme(themeRef.current)), syntaxHighlighting(highlighting), language,
           keymap.of([{ key: 'Mod-s', run: () => { callbacks.current.onSave(file.path); return true; } }]),
           EditorView.updateListener.of(update => {
             if (update.docChanged) callbacks.current.onChange(file.path, update.state.doc.toString());
@@ -70,8 +78,9 @@ export default function Editor({ file, onChange, onSave, onCursor }: {
           }),
         ] }),
       });
+      editor.current = view;
     });
-    return () => { disposed = true; view?.destroy(); };
+    return () => { disposed = true; view?.destroy(); editor.current = undefined; };
     // Preserve the editor and undo history as its document changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file.path]);

@@ -4,9 +4,14 @@ import { Terminal as XTerminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { TerminalSquare, Play } from 'lucide-react';
 import { native } from './workspace';
+import { terminalTheme, useTheme } from './theme';
 
 export default function Terminal({ id, root }: { id: string; root: string | null }) {
   const host = useRef<HTMLDivElement>(null);
+  const { theme } = useTheme();
+  const themeRef = useRef(theme); themeRef.current = theme;
+  const instance = useRef<XTerminal | undefined>(undefined);
+  useEffect(() => { if (instance.current) instance.current.options.theme = terminalTheme(theme); }, [theme]);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState('');
   useEffect(() => {
@@ -14,7 +19,8 @@ export default function Terminal({ id, root }: { id: string; root: string | null
     let disposed = false;
     let started = false;
     const pendingInput: string[] = [];
-    const terminal = new XTerminal({ cursorBlink: true, fontFamily: '"Cascadia Code", Consolas, monospace', fontSize: 13, theme: { background: '#191d23', foreground: '#cbd3df', cursor: '#92b4f4', selectionBackground: '#344963' }, scrollback: 3000 });
+    const terminal = new XTerminal({ cursorBlink: true, fontFamily: '"Cascadia Code", Consolas, monospace', fontSize: 13, theme: terminalTheme(themeRef.current), scrollback: 3000 });
+    instance.current = terminal;
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(host.current);
@@ -43,7 +49,7 @@ export default function Terminal({ id, root }: { id: string; root: string | null
     }).catch(err => { if (!disposed) setError(String(err)); });
     return () => {
       disposed = true;
-      observer.disconnect(); input.dispose(); terminal.dispose();
+      observer.disconnect(); input.dispose(); terminal.dispose(); instance.current = undefined;
       if (started) void invoke('terminal_close', { id }).catch(() => {});
     };
   }, [running, id]);

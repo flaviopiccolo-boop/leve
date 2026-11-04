@@ -47,6 +47,7 @@ Native Windows file drag-and-drop is disabled in the WebView to allow HTML panel
 - External-change checks before saving, with a temporary file written in the same directory before replacing the original.
 - PowerShell sessions with byte-stream output, keyboard input, resizing, and cleanup.
 - English interface, messages, documentation, and demo content.
+- Dark and light themes under **Settings → Appearance**, applied immediately to panels, the editor, and open terminals. The preference is saved locally; switching themes preserves editor history and terminal sessions.
 
 ## Current limitations
 

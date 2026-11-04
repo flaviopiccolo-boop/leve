@@ -97,3 +97,34 @@ test('updates built-in labels in layouts saved by older versions', async ({ page
   await expect(page.getByRole('tab', { name: 'Search', exact: true })).toBeVisible();
   await expect(page.getByRole('tab', { name: 'Welcome', exact: true })).toBeVisible();
 });
+
+test('switches themes without losing edits or undo history and saves the preference', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await page.getByRole('button', { name: 'main.py', exact: true }).click();
+  const code = page.locator('.cm-content');
+  await code.click();
+  await page.keyboard.press('Control+End');
+  await page.keyboard.insertText('\n# preserve theme change');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('radio', { name: 'Light', exact: true }).check();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await page.getByRole('button', { name: 'Close settings' }).click();
+  await expect(code).toContainText('# preserve theme change');
+  await expect(page.locator('.cm-editor')).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  await expect(page.locator('.terminal-start')).toHaveCSS('background-color', 'rgb(250, 251, 253)');
+  await expect(page.getByRole('button', { name: 'main.py', exact: true })).toHaveCSS('color', 'rgb(52, 64, 84)');
+  await code.click();
+  await page.keyboard.press('Control+z');
+  await expect(code).not.toContainText('# preserve theme change');
+  await page.screenshot({ path: 'artifacts/leve-light.png' });
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('radio', { name: 'Light', exact: true })).toBeChecked();
+  await page.getByRole('radio', { name: 'Dark', exact: true }).check();
+  await page.getByRole('button', { name: 'Close settings' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+});
