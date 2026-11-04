@@ -5,6 +5,7 @@ import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import { useTheme } from './theme';
 import { loadShells, previewShells, type ShellProfile } from './shells';
 import { loadSession, restoreFiles, saveSession, type Session } from './session';
+import { loadProjects, rememberProject, sameProject } from './projects';
 import { activateWorkspace, fileName, indexFiles, languageName, listFiles, native, pickWorkspace, readFile, writeFile, type FileEntry, type OpenFile } from './workspace';
 
 const LAYOUT_KEY = 'leve.layout.v1';
@@ -79,6 +80,10 @@ export default function App() {
   const [refresh, setRefresh] = useState(0);
   const [notice, setNotice] = useState('');
   const [settings, setSettings] = useState(false);
+  const [projects, setProjects] = useState(loadProjects);
+  const [projectMenu, setProjectMenu] = useState(false);
+  const [switchingProject, setSwitchingProject] = useState(false);
+  const projectPicker = useRef<HTMLButtonElement>(null);
   const [profiles, setProfiles] = useState<ShellProfile[]>(native ? [] : previewShells);
   const [terminalMenu, setTerminalMenu] = useState<{ left: number; top: number } | null>(null);
   const [query, setQuery] = useState('');
@@ -104,6 +109,10 @@ export default function App() {
   const fileIndex = useRef<Promise<FileEntry[]> | null>(null);
 
   const notify = useCallback((message: string) => setNotice(message), []);
+  const remember = useCallback((path: string) => {
+    try { setProjects(rememberProject(path)); }
+    catch { notify('The project opened, but its history could not be saved.'); }
+  }, [notify]);
   const snapshot = useCallback((): Session => {
     const current = sessionRef.current;
     return { version: 1, root: current.root, files: Object.values(current.files), activeFile: current.activeFile, layout: current.model.toJson() };
@@ -137,13 +146,14 @@ export default function App() {
         const selected = restored.files[saved.activeFile] ? saved.activeFile : Object.keys(restored.files)[0] || '';
         if (selected) nextModel.doAction(Actions.selectTab(`file:${selected}`));
         setRoot(openedRoot); setFiles(restored.files); setModel(nextModel); setActiveFile(selected);
+        if (openedRoot && !blocked) remember(openedRoot);
         setRecoveryBlocked(blocked); setRecoveryWarning(restored.warnings.join(' '));
         setRecoveryLocked(false); setRecoveryError(''); setRefresh(value => value + 1);
         if (restored.recovered) notify(`Recovered unsaved changes in ${restored.recovered} file(s).`);
       }
     } catch (error) { setRecoveryLocked(true); setRecoveryError(`Could not load recovery: ${String(error)}. Existing data has been preserved.`); }
     finally { setSessionReady(true); }
-  }, [notify]);
+  }, [notify, remember]);
   useEffect(() => { void recoverSession(); }, [recoverSession]);
   useEffect(() => {
     if (!sessionReady || recoveryLocked) return;
@@ -203,18 +213,24 @@ export default function App() {
     return native ? confirmDialog(message, { title: 'Unsaved changes', kind: 'warning' }) : window.confirm(message);
   };
 
-  const openFolder = async () => {
+  const openFolder = async (recentPath?: string) => {
+    setProjectMenu(false);
+    if (switchingProject) return;
+    if (recentPath && root && sameProject(recentPath, root) && !recoveryBlocked) return;
     if (!native) { notify('The preview uses demo files. Open the desktop app to select a real folder.'); return; }
+    setSwitchingProject(true);
     try {
-      const selectedPath = await pickWorkspace();
+      const selectedPath = recentPath ?? await pickWorkspace();
       if (!selectedPath || !await canDiscard()) return;
       if (recoveryLocked && !await confirmDialog('Replace the unreadable recovery snapshot with a new session?', { title: 'Start a new session', kind: 'warning' })) return;
       const selected = await activateWorkspace(selectedPath);
+      remember(selected);
       generation.current += 1;
       setRoot(selected); setFiles({}); setActiveFile(''); setQuery(''); setMatches([]);
       setRecoveryLocked(false); setRecoveryBlocked(''); setRecoveryWarning(''); setRecoveryError('');
       setModel(Model.fromJson(initialLayout())); setRefresh(value => value + 1);
-    } catch (error) { notify(String(error)); }
+    } catch (error) { notify(`Could not open project: ${String(error)}`); }
+    finally { setSwitchingProject(false); projectPicker.current?.focus(); }
   };
 
   const addTerminal = (shellId = 'powershell') => {
@@ -280,7 +296,7 @@ export default function App() {
 
   useEffect(() => {
     const handle = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setTerminalMenu(null);
+      if (event.key === 'Escape') { setTerminalMenu(null); setProjectMenu(false); if (projectMenu) projectPicker.current?.focus(); }
       if (!(event.ctrlKey || event.metaKey)) return;
       if (event.key.toLowerCase() === 's') { event.preventDefault(); if (activeFile) void saveFile(activeFile); }
       if (event.key.toLowerCase() === 'p') {
@@ -349,7 +365,7 @@ export default function App() {
 
   return <div className="app-shell">
     <header className="titlebar"><div className="app-name"><Code2 size={18} /><strong>leve</strong><span className="preview-tag">preview</span></div>
-      <button className="project-picker" onClick={() => void openFolder()}><Folder size={13} /><span>{root ? fileName(root) : 'No folder open'}</span><ChevronDown size={12} /></button>
+      <button ref={projectPicker} className="project-picker" title={root || 'Switch project'} aria-haspopup="menu" aria-expanded={projectMenu} aria-controls={projectMenu ? 'project-menu' : undefined} disabled={switchingProject} onClick={() => setProjectMenu(value => !value)}><Folder size={13} /><span>{root ? fileName(root) : 'No folder open'}</span><ChevronDown size={12} /></button>
       <button className="icon-button" title="Layout and shortcuts" onClick={() => setSettings(true)}><Settings2 size={16} /></button>
     </header>
     {(recoveryBlocked || recoveryWarning || recoveryError) && <div className="recovery-banner" role="alert"><span>{recoveryBlocked || recoveryError || recoveryWarning}</span>
@@ -378,6 +394,23 @@ export default function App() {
     <footer className="statusbar"><span className="status-indicator" />{native ? 'Local' : 'Web preview'}<span className="status-divider" /><span>{root ? fileName(root) : 'Demo project'}</span><div className="status-spacer" /><span title={checkpointTime ? `Last recovery checkpoint: ${checkpointTime}` : 'Preparing recovery'}>{recoveryError || recoveryLocked ? 'Recovery unavailable' : checkpointTime ? 'Recovery saved' : 'Recovery pending'}</span><span>Ln {position.line}, Col {position.col}</span><span>UTF-8</span><span>{activeFile ? languageName(activeFile) : 'Leve'}</span></footer>
     {(!sessionReady || closing) && <div className="session-loading" role="status">{closing ? 'Saving session…' : 'Restoring session…'}</div>}
     {notice && <div className="toast" role="status"><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={15} /></button></div>}
+    {projectMenu && <div className="project-menu-backdrop" onClick={() => { setProjectMenu(false); projectPicker.current?.focus(); }}>
+      <div id="project-menu" className="project-menu" role="menu" aria-label="Recent projects" onClick={event => event.stopPropagation()} onKeyDown={event => {
+        const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'));
+        const index = items.indexOf(document.activeElement as HTMLButtonElement);
+        if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+          event.preventDefault();
+          const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+          items[next]?.focus();
+        }
+        if (event.key === 'Tab') setProjectMenu(false);
+      }}>
+        <div className="terminal-menu-heading">RECENT PROJECTS</div>
+        {!projects.length && <p>No recent projects yet.</p>}
+        {projects.map((path, index) => <button autoFocus={index === 0} role="menuitem" key={path} title={path} onClick={() => void openFolder(path)}><Folder size={15} /><span><strong>{fileName(path)}</strong><small>{path}</small></span>{root && sameProject(path, root) && <small className="project-current">Current</small>}</button>)}
+        <button autoFocus={!projects.length} className="project-browse" role="menuitem" onClick={() => void openFolder()}><FolderOpen size={15} /><span>Open another folder…</span></button>
+      </div>
+    </div>}
     {terminalMenu && <div className="terminal-menu-backdrop" onClick={() => setTerminalMenu(null)} onKeyDown={event => { if (event.key === 'Escape') setTerminalMenu(null); }}>
       <div className="terminal-menu" role="menu" aria-label="New terminal" style={terminalMenu} onClick={event => event.stopPropagation()}>
         <div className="terminal-menu-heading">NEW TERMINAL</div>

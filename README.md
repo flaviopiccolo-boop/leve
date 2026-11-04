@@ -51,6 +51,7 @@ Native Windows file drag-and-drop is disabled in the WebView to allow HTML panel
 - English interface, messages, documentation, and demo content.
 - Dark and light themes under **Settings → Appearance**, applied immediately to panels, the editor, and open terminals. The preference is saved locally; switching themes preserves editor history and terminal sessions.
 - Last-project and open-file recovery, including the active file, panel arrangement, and unsaved buffers. Terminal tabs remain empty at startup.
+- Project switcher in the title bar with persistent recent-folder history, most recently opened first. Each entry shows its full path to distinguish folders with the same name. **Open another folder…** opens the folder dialog. Switching projects checks for unsaved changes; unavailable folders keep the current project open.
 
 ## Session recovery
 

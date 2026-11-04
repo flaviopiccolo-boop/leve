@@ -15,7 +15,8 @@ async function nativeBridge(page: Page) {
         if (command === 'session_save') { localStorage.setItem('test-native-session', JSON.stringify(args.session)); return; }
         if (command === 'list_shells') return [];
         if (command === 'plugin:event|listen') return 1;
-        if (command === 'plugin:dialog|open') return 'C:\\project';
+        if (command === 'plugin:dialog|message') return localStorage.getItem('test-confirm') === 'cancel' ? 'Cancel' : 'Ok';
+        if (command === 'plugin:dialog|open') { localStorage.setItem('test-picker-count', String(Number(localStorage.getItem('test-picker-count')) + 1)); return localStorage.getItem('test-next-project') || 'C:\\project'; }
         if (command === 'set_workspace') {
           if (localStorage.getItem('test-project-missing')) throw new Error('Folder not found');
           return args.path;
@@ -54,6 +55,7 @@ test('reopens the last project and reloads clean files from disk', async ({ page
   await nativeBridge(page);
   await page.goto('/');
   await page.getByRole('button', { name: 'No folder open', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Open another folder…' }).click();
   await page.getByRole('button', { name: 'main.py', exact: true }).click();
   await expect(page.locator('.cm-content')).toContainText('original disk content');
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('test-native-session') || '{}').root)).toBe('C:\\project');
@@ -68,6 +70,7 @@ test('preserves dirty buffers and the conflict baseline when disk content change
   await nativeBridge(page);
   await page.goto('/');
   await page.getByRole('button', { name: 'No folder open', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Open another folder…' }).click();
   await page.getByRole('button', { name: 'main.py', exact: true }).click();
   await page.locator('.cm-content').click();
   await page.keyboard.press('Control+End');
@@ -86,6 +89,7 @@ test('keeps recovery buffers when a project folder cannot be reopened', async ({
   await nativeBridge(page);
   await page.goto('/');
   await page.getByRole('button', { name: 'No folder open', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Open another folder…' }).click();
   await page.getByRole('button', { name: 'main.py', exact: true }).click();
   await page.locator('.cm-content').click();
   await page.keyboard.press('Control+End');
@@ -112,4 +116,52 @@ test('preserves an unreadable snapshot until the user explicitly starts a new se
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   expect(await page.evaluate(() => localStorage.getItem('leve.session.v1'))).toBe('{broken recovery data');
   await expect(page.getByRole('button', { name: 'Start a new session' })).toBeVisible();
+});
+
+test('switches recent projects without a folder dialog and persists their order', async ({ page }) => {
+  await nativeBridge(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'No folder open', exact: true }).click();
+  await expect(page.getByRole('menu', { name: 'Recent projects' })).toContainText('No recent projects yet');
+  expect(await page.evaluate(() => localStorage.getItem('test-picker-count'))).toBeNull();
+  await page.getByRole('menuitem', { name: 'Open another folder…' }).click();
+  await page.evaluate(() => localStorage.setItem('test-next-project', 'C:\\other\\project'));
+  await page.locator('.project-picker').click();
+  await page.getByRole('menuitem', { name: 'Open another folder…' }).click();
+  await page.locator('.project-picker').click();
+  await expect(page.getByRole('menuitem')).toHaveCount(3);
+  await page.getByRole('menuitem').filter({ hasText: 'C:\\project' }).click();
+  expect(await page.evaluate(() => localStorage.getItem('test-picker-count'))).toBe('2');
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('leve.projects.v1') || '[]'))).toEqual(['C:\\project', 'C:\\other\\project']);
+  await page.reload();
+  await page.locator('.project-picker').click();
+  await expect(page.getByRole('menuitem').nth(0)).toContainText('C:\\project');
+  await expect(page.getByRole('menuitem').nth(1)).toContainText('C:\\other\\project');
+  await page.keyboard.press('End');
+  await expect(page.getByRole('menuitem', { name: 'Open another folder…' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(page.locator('.project-picker')).toBeFocused();
+});
+
+test('cancelled and failed project switches preserve the current edits and history', async ({ page }) => {
+  await nativeBridge(page);
+  await page.goto('/');
+  await page.evaluate(() => localStorage.setItem('leve.projects.v1', JSON.stringify(['C:\\other'])));
+  await page.reload();
+  await page.locator('.project-picker').click();
+  await page.getByRole('menuitem', { name: 'Open another folder…' }).click();
+  await page.getByRole('button', { name: 'main.py', exact: true }).click();
+  await page.locator('.cm-content').click();
+  await page.keyboard.insertText('keep my draft ');
+  await page.evaluate(() => localStorage.setItem('test-confirm', 'cancel'));
+  await page.locator('.project-picker').click();
+  await page.getByRole('menuitem').filter({ hasText: 'C:\\other' }).click();
+  await expect(page.locator('.cm-content')).toContainText('keep my draft');
+  await page.evaluate(() => { localStorage.removeItem('test-confirm'); localStorage.setItem('test-project-missing', 'true'); });
+  await page.locator('.project-picker').click();
+  await page.getByRole('menuitem').filter({ hasText: 'C:\\other' }).click();
+  await expect(page.getByRole('status')).toContainText('Could not open project');
+  await expect(page.locator('.cm-content')).toContainText('keep my draft');
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('leve.projects.v1') || '[]'))).toEqual(['C:\\project', 'C:\\other']);
 });
