@@ -128,3 +128,62 @@ test('switches themes without losing edits or undo history and saves the prefere
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
 });
+
+test('the plus button opens a shell picker and creates the selected terminal tab', async ({ page }) => {
+  await page.goto('/');
+  const plus = page.getByRole('button', { name: 'New terminal', exact: true }).filter({ has: page.locator('svg.lucide-plus') });
+  await plus.click();
+  await expect(page.getByRole('menu', { name: 'New terminal' })).toBeVisible();
+  await page.getByRole('menuitem', { name: 'CMD', exact: true }).click();
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(page.getByRole('tab', { name: 'CMD', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('combobox', { name: 'Terminal profile' }).filter({ visible: true })).toHaveValue('cmd');
+  await plus.click();
+  await page.getByRole('menuitem', { name: 'Git Bash', exact: true }).click();
+  await expect(page.getByRole('tab', { name: 'Git Bash', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await page.reload();
+  await expect(page.getByRole('tab', { name: 'CMD', exact: true })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Git Bash', exact: true })).toBeVisible();
+});
+
+test('desktop shell selection starts immediately and keeps other terminal sessions open', async ({ page }) => {
+  await page.addInitScript(() => {
+    const starts: string[] = [];
+    const closes: string[] = [];
+    let callbackId = 0;
+    Object.assign(window, {
+      isTauri: true,
+      shellCalls: { starts, closes },
+      __TAURI_INTERNALS__: {
+        metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+        transformCallback: () => ++callbackId,
+        unregisterCallback: () => {},
+        invoke: async (command: string, args: Record<string, unknown> = {}) => {
+          if (command === 'list_shells') return [
+            { id: 'powershell', name: 'PowerShell', available: true },
+            { id: 'cmd', name: 'CMD', available: true },
+            { id: 'git-bash', name: 'Git Bash', available: true },
+            { id: 'pwsh', name: 'PowerShell 7', available: false },
+          ];
+          if (command === 'plugin:dialog|open' || command === 'set_workspace') return 'C:\\test-project';
+          if (command === 'list_directory') return [];
+          if (command === 'plugin:event|listen') return 1;
+          if (command === 'terminal_start') starts.push(String(args.shellId));
+          if (command === 'terminal_close') closes.push(String(args.id));
+        },
+      },
+    });
+  });
+  await page.goto('/');
+  await page.locator('.welcome').getByRole('button', { name: 'Open folder Local', exact: true }).click();
+  const plus = page.getByRole('button', { name: 'New terminal', exact: true }).filter({ has: page.locator('svg.lucide-plus') });
+  await plus.click();
+  await expect(page.getByRole('menuitem', { name: 'PowerShell 7 Not installed' })).toBeDisabled();
+  await page.getByRole('menuitem', { name: 'CMD', exact: true }).click();
+  await expect(page.getByRole('tabpanel', { name: 'CMD', exact: true }).locator('.xterm')).toBeVisible();
+  await plus.click();
+  await page.getByRole('menuitem', { name: 'Git Bash', exact: true }).click();
+  await expect(page.getByRole('tabpanel', { name: 'Git Bash', exact: true }).locator('.xterm')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { shellCalls: { starts: string[] } }).shellCalls.starts)).toEqual(['cmd', 'git-bash']);
+  expect(await page.evaluate(() => (window as unknown as { shellCalls: { closes: string[] } }).shellCalls.closes)).toEqual([]);
+});

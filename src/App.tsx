@@ -1,8 +1,9 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { Actions, DockLocation, Layout, Model, TabNode, type Action, type IJsonModel } from 'flexlayout-react';
 import { Blocks, ChevronDown, ChevronRight, Code2, FileCode2, Files, Folder, FolderOpen, Keyboard, LayoutTemplate, Plus, RefreshCw, Search, Settings2, TerminalSquare, X } from 'lucide-react';
 import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import { useTheme } from './theme';
+import { loadShells, previewShells, type ShellProfile } from './shells';
 import { activateWorkspace, fileName, indexFiles, languageName, listFiles, native, pickWorkspace, readFile, writeFile, type FileEntry, type OpenFile } from './workspace';
 
 const LAYOUT_KEY = 'leve.layout.v1';
@@ -34,8 +35,9 @@ function loadLayout() {
       const json = JSON.parse(raw) as IJsonModel;
       // Never restore file content or open shells from an earlier workspace.
       const panelNames: Record<string, string> = { explorer: 'Explorer', search: 'Search', welcome: 'Welcome' };
-      const clean = (node: { children?: any[]; component?: string; selected?: number; name?: string }) => {
+      const clean = (node: { children?: any[]; component?: string; selected?: number; name?: string; config?: { shellId?: string; autoStart?: boolean } }) => {
         if (node.component && panelNames[node.component]) node.name = panelNames[node.component];
+        if (node.component === 'terminal') node.config = { ...node.config, autoStart: false };
         if (node.children) node.children = node.children.filter(n => n.component !== 'file');
         if (node.selected !== undefined) node.selected = 0;
         node.children?.forEach(clean);
@@ -79,6 +81,8 @@ export default function App() {
   const [refresh, setRefresh] = useState(0);
   const [notice, setNotice] = useState('');
   const [settings, setSettings] = useState(false);
+  const [profiles, setProfiles] = useState<ShellProfile[]>(native ? [] : previewShells);
+  const [terminalMenu, setTerminalMenu] = useState<{ left: number; top: number } | null>(null);
   const [query, setQuery] = useState('');
   const [matches, setMatches] = useState<FileEntry[]>([]);
   const [searching, setSearching] = useState(false);
@@ -91,6 +95,11 @@ export default function App() {
   const fileIndex = useRef<Promise<FileEntry[]> | null>(null);
 
   const notify = useCallback((message: string) => setNotice(message), []);
+  useEffect(() => {
+    let active = true;
+    void loadShells().then(items => { if (active) setProfiles(items); }).catch(error => { if (active) notify(`Could not detect shells: ${String(error)}`); });
+    return () => { active = false; };
+  }, [notify]);
   useEffect(() => { if (notice) { const timer = setTimeout(() => setNotice(''), 6500); return () => clearTimeout(timer); } }, [notice]);
 
   const persist = (current: Model) => {
@@ -146,10 +155,20 @@ export default function App() {
     } catch (error) { notify(String(error)); }
   };
 
-  const addTerminal = () => {
+  const addTerminal = (shellId = 'powershell') => {
+    if (native && !root) { notify('Open a folder before starting a terminal.'); return; }
+    const profile = profiles.find(item => item.id === shellId);
+    if (!profile?.available) { notify('This terminal is not installed or is still being detected.'); return; }
     const id = `terminal-${crypto.randomUUID()}`;
     const target = model.getNodeById('terminals') || model.getNodeById('documents');
-    if (target) model.doAction(Actions.addNode({ type: 'tab', id, name: 'PowerShell', component: 'terminal' }, target.getId(), DockLocation.CENTER, -1));
+    if (target) model.doAction(Actions.addNode({ type: 'tab', id, name: profile.name, component: 'terminal', config: { shellId, autoStart: true } }, target.getId(), DockLocation.CENTER, -1));
+    setTerminalMenu(null);
+  };
+
+  const openTerminalMenu = (event: MouseEvent<HTMLButtonElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    setTerminalMenu({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 268)), top: rect.bottom + 240 < window.innerHeight ? rect.bottom + 4 : Math.max(8, rect.top - 240) });
+    void loadShells().then(setProfiles).catch(error => notify(`Could not detect shells: ${String(error)}`));
   };
 
   useEffect(() => { fileIndex.current = null; }, [refresh]);
@@ -191,6 +210,7 @@ export default function App() {
 
   useEffect(() => {
     const handle = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setTerminalMenu(null);
       if (!(event.ctrlKey || event.metaKey)) return;
       if (event.key.toLowerCase() === 's') { event.preventDefault(); if (activeFile) void saveFile(activeFile); }
       if (event.key.toLowerCase() === 'p') {
@@ -244,7 +264,10 @@ export default function App() {
         const file = files[node.getConfig().path];
         return file ? <Suspense fallback={<p className="panel-description">Loading editor…</p>}><Editor file={file} onChange={(path, content) => setFiles(previous => ({ ...previous, [path]: { ...previous[path], content } }))} onSave={path => void saveFile(path)} onCursor={(line, col) => setPosition({ line, col })} /></Suspense> : null;
       }
-      case 'terminal': return <Suspense fallback={null}><Terminal id={node.getId()} root={root} /></Suspense>;
+      case 'terminal': return <Suspense fallback={null}><Terminal id={node.getId()} root={root} shellId={node.getConfig()?.shellId} autoStart={node.getConfig()?.autoStart} profiles={profiles} onShellChange={shellId => {
+        const profile = profiles.find(item => item.id === shellId);
+        if (profile) model.doAction(Actions.updateNodeAttributes(node.getId(), { name: profile.name, config: { shellId, autoStart: false } }));
+      }} /></Suspense>;
       default: return <div className="welcome panel-scroll"><div className="welcome-content">
         <div className="brand-mark"><Code2 size={36} strokeWidth={1.4} /></div>
         <div className="eyebrow">LESS DISTRACTION. MORE CODE.</div><h1>Room to create.</h1>
@@ -265,7 +288,7 @@ export default function App() {
     <div className="workspace"><aside className="activity-bar" aria-label="Navigation">
       <button title="Explorer" className="activity-button" onClick={() => model.doAction(Actions.selectTab('explorer'))}><Files size={21} /></button>
       <button title="Find files (Ctrl+P)" className="activity-button" onClick={() => { model.doAction(Actions.selectTab('search')); setTimeout(() => document.getElementById('file-search')?.focus(), 0); }}><Search size={21} /></button>
-      <button title="New terminal" className="activity-button" onClick={addTerminal}><TerminalSquare size={21} /></button>
+      <button title="New terminal" className="activity-button" onClick={openTerminalMenu}><TerminalSquare size={21} /></button>
       <div className="activity-spacer" /><button title="Settings" className="activity-button" onClick={() => setSettings(true)}><Settings2 size={21} /></button>
     </aside><main className="layout-host"><Layout model={model} factory={factory} onAction={onAction}
       onModelChange={current => { persist(current); const active = current.getActiveTabset()?.getSelectedNode(); if (active instanceof TabNode && active.getComponent() === 'file') setActiveFile(active.getConfig().path); }}
@@ -274,10 +297,17 @@ export default function App() {
         const dirty = path && files[path]?.content !== files[path]?.saved;
         if (dirty) values.content = <span>{node.getName()}<span className="dirty-dot" title="Unsaved changes">●</span></span>;
       }}
-      onRenderTabSet={(node, values) => { if (node.getId() === 'terminals') values.buttons.push(<button key="new" className="icon-button" title="New terminal" onClick={addTerminal}><Plus size={14} /></button>); }}
+      onRenderTabSet={(node, values) => { if (node.getId() === 'terminals') values.buttons.push(<button key="new" className="icon-button" title="New terminal" aria-haspopup="menu" onClick={openTerminalMenu}><Plus size={14} /></button>); }}
     /></main></div>
     <footer className="statusbar"><span className="status-indicator" />{native ? 'Local' : 'Web preview'}<span className="status-divider" /><span>{root ? fileName(root) : 'Demo project'}</span><div className="status-spacer" /><span>Ln {position.line}, Col {position.col}</span><span>UTF-8</span><span>{activeFile ? languageName(activeFile) : 'Leve'}</span></footer>
     {notice && <div className="toast" role="status"><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={15} /></button></div>}
+    {terminalMenu && <div className="terminal-menu-backdrop" onClick={() => setTerminalMenu(null)} onKeyDown={event => { if (event.key === 'Escape') setTerminalMenu(null); }}>
+      <div className="terminal-menu" role="menu" aria-label="New terminal" style={terminalMenu} onClick={event => event.stopPropagation()}>
+        <div className="terminal-menu-heading">NEW TERMINAL</div>
+        {profiles.map((profile, index) => <button autoFocus={index === 0} role="menuitem" key={profile.id} disabled={!profile.available || (native && !root)} onClick={() => addTerminal(profile.id)}><TerminalSquare size={15} /><span>{profile.name}</span>{!profile.available && <small>Not installed</small>}</button>)}
+        <p>{!native ? 'Preview only. Shell availability is checked in the desktop app.' : !root ? 'Open a folder to start a terminal.' : 'Starts immediately in your project folder.'}</p>
+      </div>
+    </div>}
     {settings && <div className="modal-backdrop" onClick={() => setSettings(false)}><section className="settings-modal" role="dialog" aria-modal="true" aria-label="Layout and shortcuts" onClick={event => event.stopPropagation()}>
       <div className="modal-heading"><h2>Your workspace</h2><button className="icon-button" aria-label="Close settings" onClick={() => setSettings(false)}><X size={18} /></button></div>
       <fieldset className="theme-picker"><legend>Appearance</legend><div className="theme-options">

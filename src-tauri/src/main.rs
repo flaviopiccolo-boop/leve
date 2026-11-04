@@ -1,6 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+mod shells;
+
+use portable_pty::{native_pty_system, Child, MasterPty, PtySize};
+#[cfg(test)]
+use portable_pty::CommandBuilder;
 use serde::Serialize;
 use std::{collections::HashMap, fs, io::{Read, Write}, path::{Path, PathBuf}, sync::Mutex};
 use tauri::{ipc::Channel, Manager, State};
@@ -43,6 +47,7 @@ fn workspace_root(workspace: &Workspace) -> Result<PathBuf, String> {
     workspace.root.lock().map_err(error)?.clone().ok_or_else(|| "Open a folder first.".into())
 }
 
+#[cfg(test)]
 fn terminal_working_directory(root: &Path) -> &Path {
     // Keep canonical paths internally; shells and batch files need DOS paths.
     dunce::simplified(root)
@@ -116,16 +121,13 @@ async fn write_file(path: String, content: String, expected: String, state: Stat
 }
 
 #[tauri::command]
-async fn terminal_start(id: String, cols: u16, rows: u16, output: Channel<Vec<u8>>, state: State<'_, Workspace>) -> Result<(), String> {
+async fn terminal_start(id: String, shell_id: Option<String>, cols: u16, rows: u16, output: Channel<Vec<u8>>, state: State<'_, Workspace>) -> Result<(), String> {
     let root = workspace_root(&state)?;
     let mut sessions = state.terminals.lock().map_err(error)?;
     if sessions.contains_key(&id) { return Err("This session is already open.".into()); }
     if sessions.len() >= 16 { return Err("The limit of 16 terminals has been reached.".into()); }
     let pair = native_pty_system().openpty(PtySize { rows: rows.max(1), cols: cols.max(1), pixel_width: 0, pixel_height: 0 }).map_err(error)?;
-    let mut command = CommandBuilder::new("powershell.exe");
-    command.args(["-NoLogo", "-NoProfile", "-NoExit", "-Command", "$OutputEncoding = [Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)"]);
-    command.cwd(terminal_working_directory(&root));
-    command.env("TERM", "xterm-256color");
+    let command = shells::command(shell_id.as_deref().unwrap_or("powershell"), &root)?;
     let mut reader = pair.master.try_clone_reader().map_err(error)?;
     let writer = pair.master.take_writer().map_err(error)?;
     let child = pair.slave.spawn_command(command).map_err(error)?;
@@ -168,7 +170,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Workspace::default())
-        .invoke_handler(tauri::generate_handler![set_workspace, list_directory, read_file, write_file, terminal_start, terminal_write, terminal_resize, terminal_close])
+        .invoke_handler(tauri::generate_handler![set_workspace, list_directory, read_file, write_file, shells::list_shells, terminal_start, terminal_write, terminal_resize, terminal_close])
         .build(tauri::generate_context!())
         .expect("Could not start Leve")
         .run(|app, event| {
@@ -205,17 +207,24 @@ mod tests {
 
     #[cfg(windows)]
     fn run_powershell(cwd: Option<&Path>, script: &str, marker: &str) -> String {
+        let mut command = CommandBuilder::new("powershell.exe");
+        let script = format!("[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); {script}");
+        command.args(["-NoLogo", "-NoProfile", "-Command", &script]);
+        if let Some(cwd) = cwd { command.cwd(terminal_working_directory(cwd)); }
+        run_pty(command, &[], marker)
+    }
+
+    #[cfg(windows)]
+    fn run_pty(command: CommandBuilder, input: &[u8], marker: &str) -> String {
         let pair = native_pty_system().openpty(PtySize {
             rows: 24, cols: 80, pixel_width: 0, pixel_height: 0,
         }).unwrap();
         let mut reader = pair.master.try_clone_reader().unwrap();
         let mut writer = pair.master.take_writer().unwrap();
-        let mut command = CommandBuilder::new("powershell.exe");
-        let script = format!("[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); {script}");
-        command.args(["-NoLogo", "-NoProfile", "-Command", &script]);
-        if let Some(cwd) = cwd { command.cwd(terminal_working_directory(cwd)); }
         let mut child = pair.slave.spawn_command(command).unwrap();
         drop(pair.slave);
+        writer.write_all(input).unwrap();
+        writer.flush().unwrap();
         let (send, receive) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut buffer = [0_u8; 4096];
@@ -265,5 +274,29 @@ mod tests {
         assert!(output.contains(&expected_directory), "Received output: {output:?}");
         assert!(!output.contains("UNC paths are not supported"));
         assert!(!output.contains("Microsoft.PowerShell.Core\\FileSystem::"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installed_shells_read_unicode_files_from_the_project_directory() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("shell project ação");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("relative.txt"), "LEVE_SHELL_FILE_OK_ação\r\n").unwrap();
+        let canonical = root.canonicalize().unwrap();
+        let mut tested = Vec::new();
+        for profile in shells::list_shells().into_iter().filter(|profile| profile.available) {
+            let (input, expected) = match profile.id {
+                "cmd" => ("echo LEVE_CWD=%CD% & type relative.txt\r".to_string(), format!("LEVE_CWD={}", terminal_working_directory(&canonical).display())),
+                "git-bash" => ("printf 'LEVE_CWD='; pwd -W; cat relative.txt\r".to_string(), format!("LEVE_CWD={}", terminal_working_directory(&canonical).display()).replace('\\', "/")),
+                _ => ("[Console]::WriteLine('LEVE_CWD=' + (Get-Location).Path); Get-Content -Encoding UTF8 relative.txt\r".to_string(), format!("LEVE_CWD={}", terminal_working_directory(&canonical).display())),
+            };
+            let output = run_pty(shells::command(profile.id, &canonical).unwrap(), input.as_bytes(), "LEVE_SHELL_FILE_OK_ação");
+            assert!(output.contains(&expected), "{} directory mismatch: {output:?}", profile.name);
+            tested.push(profile.name);
+        }
+        assert!(tested.contains(&"PowerShell"));
+        assert!(tested.contains(&"CMD"));
+        println!("Verified shells: {}", tested.join(", "));
     }
 }

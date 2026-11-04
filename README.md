@@ -27,9 +27,11 @@ In addition to Node.js, install the [official Tauri prerequisites](https://v2.ta
 npm run desktop
 ```
 
-Select **Open folder** to choose a real project. The explorer loads subfolders as you expand them. Open a file and press **Ctrl+S** to save it. Select **Start PowerShell** in the bottom panel to open a shell in the selected folder. The **+** button adds another terminal tab; sessions start only when requested.
+Select **Open folder** to choose a real project. The explorer loads subfolders as you expand them. Open a file and press **Ctrl+S** to save it. The initial terminal tab has a profile selector and a start button. Click **+** to choose a shell; selecting it creates, selects, and immediately starts a new terminal in the project folder. Existing terminal sessions stay open. Press Ctrl and the backtick key to create a PowerShell session directly.
 
-The terminal uses xterm.js in the frontend and portable-pty/ConPTY in Rust. PowerShell starts without a profile, uses UTF-8 input/output, and remains interactive. The frontend answers cursor-position queries during startup. Workspace paths are converted to a shell-compatible format when possible, so local batch files can retain the correct working directory.
+The terminal uses xterm.js in the frontend and portable-pty/ConPTY in Rust. Supported profiles are **PowerShell**, **CMD**, **Git Bash**, and **PowerShell 7**. The desktop app detects installed shells from PATH and common installation locations; unavailable profiles are disabled. Git Bash requires Git for Windows, and PowerShell 7 requires its separate installation. Reopen the picker to refresh detection. The web preview lets you try the picker and tabs without running commands or determining actual availability.
+
+PowerShell starts without a profile and uses UTF-8 input/output. CMD disables AutoRun and switches to UTF-8. Git Bash runs as an interactive login shell and preserves the project directory. The frontend answers cursor-position queries during startup. Workspace paths are converted to a shell-compatible format when possible, so local batch files can retain the correct working directory. Terminal types are saved with the layout, but saved tabs never launch shells automatically after an app restart.
 
 Closing a terminal tab, resetting the layout, changing projects, or exiting the app ends the corresponding sessions. Processes that detach from a session may continue running.
 
@@ -45,7 +47,7 @@ Native Windows file drag-and-drop is disabled in the WebView to allow HTML panel
 - File tabs, unsaved-change indicators, discard confirmation, and window-close protection.
 - Reading and saving existing files within the selected workspace.
 - External-change checks before saving, with a temporary file written in the same directory before replacing the original.
-- PowerShell sessions with byte-stream output, keyboard input, resizing, and cleanup.
+- PowerShell, CMD, Git Bash, and PowerShell 7 profiles with installation detection, byte-stream output, keyboard input, resizing, and cleanup.
 - English interface, messages, documentation, and demo content.
 - Dark and light themes under **Settings → Appearance**, applied immediately to panels, the editor, and open terminals. The preference is saved locally; switching themes preserves editor history and terminal sessions.
 
@@ -99,8 +101,10 @@ The configuration targets an NSIS installer. Installer generation and behavior s
 - `src/App.tsx`: application shell, docking, navigation, and file state.
 - `src/Editor.tsx`: CodeMirror integration and language loading.
 - `src/Terminal.tsx`: terminal frontend and Rust communication.
+- `src/shells.ts`: terminal profile types and preview data.
 - `src/workspace.ts`: workspace access and browser demo.
 - `src-tauri/src/main.rs`: local operations, saving, and PTY sessions.
+- `src-tauri/src/shells.rs`: installed-shell discovery and launch configuration.
 - `tests/editor.spec.ts`: browser integration tests.
 
 The next product decisions are the first language to support through LSP, Git integration, and session recovery.
