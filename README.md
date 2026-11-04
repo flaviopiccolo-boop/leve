@@ -121,4 +121,4 @@ The configuration targets an NSIS installer. Installer generation and behavior s
 - `src-tauri/src/session.rs`: bounded, atomic recovery snapshots and fallback storage.
 - `tests/editor.spec.ts`: browser integration tests.
 
-The next product decisions are file-management operations, project-wide content search, the first language to support through LSP, and Git integration.
+See the [product roadmap and to-do list](TODO.md) for the six recommended priorities and their completion status.
