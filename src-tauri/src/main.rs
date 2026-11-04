@@ -122,7 +122,9 @@ async fn write_file(path: String, content: String, expected: String, state: Stat
 
 #[tauri::command]
 async fn terminal_start(id: String, shell_id: Option<String>, cols: u16, rows: u16, output: Channel<Vec<u8>>, state: State<'_, Workspace>) -> Result<(), String> {
-    let root = workspace_root(&state)?;
+    let root = state.root.lock().map_err(error)?.clone()
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+        .ok_or("Could not find the home folder.")?;
     let mut sessions = state.terminals.lock().map_err(error)?;
     if sessions.contains_key(&id) { return Err("This session is already open.".into()); }
     if sessions.len() >= 16 { return Err("The limit of 16 terminals has been reached.".into()); }

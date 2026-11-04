@@ -21,9 +21,7 @@ const initialLayout = (): IJsonModel => ({
       { type: 'tabset', id: 'documents', weight: 73, enableDeleteWhenEmpty: false, children: [
         { type: 'tab', id: 'welcome', name: 'Welcome', component: 'welcome', enableClose: false },
       ] },
-      { type: 'tabset', id: 'terminals', weight: 27, enableDeleteWhenEmpty: false, children: [
-        { type: 'tab', id: 'terminal-1', name: 'PowerShell', component: 'terminal' },
-      ] },
+      { type: 'tabset', id: 'terminals', weight: 27, enableDeleteWhenEmpty: false, children: [] },
     ] },
   ] },
 });
@@ -37,8 +35,7 @@ function loadLayout() {
       const panelNames: Record<string, string> = { explorer: 'Explorer', search: 'Search', welcome: 'Welcome' };
       const clean = (node: { children?: any[]; component?: string; selected?: number; name?: string; config?: { shellId?: string; autoStart?: boolean } }) => {
         if (node.component && panelNames[node.component]) node.name = panelNames[node.component];
-        if (node.component === 'terminal') node.config = { ...node.config, autoStart: false };
-        if (node.children) node.children = node.children.filter(n => n.component !== 'file');
+        if (node.children) node.children = node.children.filter(n => n.component !== 'file' && n.component !== 'terminal');
         if (node.selected !== undefined) node.selected = 0;
         node.children?.forEach(clean);
       };
@@ -156,12 +153,11 @@ export default function App() {
   };
 
   const addTerminal = (shellId = 'powershell') => {
-    if (native && !root) { notify('Open a folder before starting a terminal.'); return; }
     const profile = profiles.find(item => item.id === shellId);
     if (!profile?.available) { notify('This terminal is not installed or is still being detected.'); return; }
     const id = `terminal-${crypto.randomUUID()}`;
     const target = model.getNodeById('terminals') || model.getNodeById('documents');
-    if (target) model.doAction(Actions.addNode({ type: 'tab', id, name: profile.name, component: 'terminal', config: { shellId, autoStart: true } }, target.getId(), DockLocation.CENTER, -1));
+    if (target) model.doAction(Actions.addNode({ type: 'tab', id, name: profile.name, component: 'terminal', config: { shellId } }, target.getId(), DockLocation.CENTER, -1));
     setTerminalMenu(null);
   };
 
@@ -264,10 +260,7 @@ export default function App() {
         const file = files[node.getConfig().path];
         return file ? <Suspense fallback={<p className="panel-description">Loading editor…</p>}><Editor file={file} onChange={(path, content) => setFiles(previous => ({ ...previous, [path]: { ...previous[path], content } }))} onSave={path => void saveFile(path)} onCursor={(line, col) => setPosition({ line, col })} /></Suspense> : null;
       }
-      case 'terminal': return <Suspense fallback={null}><Terminal id={node.getId()} root={root} shellId={node.getConfig()?.shellId} autoStart={node.getConfig()?.autoStart} profiles={profiles} onShellChange={shellId => {
-        const profile = profiles.find(item => item.id === shellId);
-        if (profile) model.doAction(Actions.updateNodeAttributes(node.getId(), { name: profile.name, config: { shellId, autoStart: false } }));
-      }} /></Suspense>;
+      case 'terminal': return <Suspense fallback={null}><Terminal id={node.getId()} shellId={node.getConfig()?.shellId} /></Suspense>;
       default: return <div className="welcome panel-scroll"><div className="welcome-content">
         <div className="brand-mark"><Code2 size={36} strokeWidth={1.4} /></div>
         <div className="eyebrow">LESS DISTRACTION. MORE CODE.</div><h1>Room to create.</h1>
@@ -304,8 +297,8 @@ export default function App() {
     {terminalMenu && <div className="terminal-menu-backdrop" onClick={() => setTerminalMenu(null)} onKeyDown={event => { if (event.key === 'Escape') setTerminalMenu(null); }}>
       <div className="terminal-menu" role="menu" aria-label="New terminal" style={terminalMenu} onClick={event => event.stopPropagation()}>
         <div className="terminal-menu-heading">NEW TERMINAL</div>
-        {profiles.map((profile, index) => <button autoFocus={index === 0} role="menuitem" key={profile.id} disabled={!profile.available || (native && !root)} onClick={() => addTerminal(profile.id)}><TerminalSquare size={15} /><span>{profile.name}</span>{!profile.available && <small>Not installed</small>}</button>)}
-        <p>{!native ? 'Preview only. Shell availability is checked in the desktop app.' : !root ? 'Open a folder to start a terminal.' : 'Starts immediately in your project folder.'}</p>
+        {profiles.map((profile, index) => <button autoFocus={index === 0} role="menuitem" key={profile.id} disabled={!profile.available} onClick={() => addTerminal(profile.id)}><TerminalSquare size={15} /><span>{profile.name}</span>{!profile.available && <small>Not installed</small>}</button>)}
+        <p>{!native ? 'Preview only. Run real shells in the desktop app.' : !root ? 'Starts immediately in your home folder.' : 'Starts immediately in your project folder.'}</p>
       </div>
     </div>}
     {settings && <div className="modal-backdrop" onClick={() => setSettings(false)}><section className="settings-modal" role="dialog" aria-modal="true" aria-label="Layout and shortcuts" onClick={event => event.stopPropagation()}>
