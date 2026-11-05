@@ -2,13 +2,13 @@
 
 Leve is a Windows code editor with a dockable workspace, integrated terminals, and session recovery. Open a local project, arrange your panels, and pick up where you left off.
 
-**[Download Leve 1.0.0 for Windows x64](https://github.com/flaviopiccolo-boop/leve/releases/download/v1.0.0/Leve_1.0.0_x64-setup.exe)** · [Release notes](https://github.com/flaviopiccolo-boop/leve/releases/tag/v1.0.0)
+**[Download Leve for Windows x64](https://github.com/flaviopiccolo-boop/leve/releases)**
 
 ![Leve 1.0 on Windows with the project explorer and a Python file open](docs/images/leve-windows.png)
 
 ## Get started
 
-1. Download and run the Windows x64 installer. The installer is unsigned and uses Microsoft Edge WebView2.
+1. Choose a version on the releases page. Under **Assets**, download and run `Leve_<version>_x64-setup.exe`. The installer is unsigned and uses Microsoft Edge WebView2.
 2. Launch Leve and select **Open folder** to open a project.
 3. Press **Ctrl+P** to find a file, **Ctrl+Shift+F** to search across the project, and **Ctrl+S** to save your changes.
 
@@ -150,7 +150,7 @@ The output is `src-tauri/target/debug/leve-editor.exe`. This build is not optimi
 npm run desktop:build
 ```
 
-On Windows x64, this produces `src-tauri/target/release/bundle/nsis/Leve_1.0.0_x64-setup.exe`. The first build downloads the NSIS tools. The installer runs per user and can download the WebView2 bootstrapper when the runtime is missing.
+On Windows x64, this produces `src-tauri/target/release/bundle/nsis/Leve_<version>_x64-setup.exe`. The first build downloads the NSIS tools. The installer runs per user and can download the WebView2 bootstrapper when the runtime is missing.
 
 The unsigned 1.0.0 package was validated in silent mode on a machine with WebView2 already present. Installation in a custom directory registered Leve in Windows. The installed app opened a project, edited and saved a real file, and restored the project and file on restart. Uninstallation removed the binaries and the Windows uninstall registration.
 
