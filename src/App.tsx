@@ -1,24 +1,27 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { Actions, BorderNode, DockLocation, Layout, Model, PopupMenu, TabNode, TabSetNode, type Action, type IJsonModel } from 'flexlayout-react';
-import { Blocks, Check, ChevronDown, Code2, FileCode2, Files, Folder, FolderOpen, GitBranch, Keyboard, LayoutTemplate, Plus, Search, Settings2, TerminalSquare, X } from 'lucide-react';
+import { Blocks, Check, ChevronDown, Code2, FileCode2, Files, Folder, FolderOpen, GitBranch, LayoutTemplate, PanelLeft, PanelLeftClose, Plus, Search, Settings2, TerminalSquare, X } from 'lucide-react';
 import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
-import { useTheme } from './theme';
 import { loadShells, previewShells, type ShellProfile } from './shells';
 import { loadSession, restoreFiles, saveSession, type Session } from './session';
 import { loadProjects, rememberProject, sameProject } from './projects';
 import { version } from '../package.json';
 import Explorer, { FileDialog } from './Explorer';
+import { loadExplorerPreferences, saveExplorerPreferences } from './explorerPreferences';
 import ContentSearch from './ContentSearch';
+import ImagePreview from './ImagePreview';
 import { gitDecorations, GitDiff, GitPanel, useGitStatus, type GitChange } from './Git';
 import WindowControls from './WindowControls';
 import Problems from './Problems';
-import { dockPanel, documentTabset, getTab, hiddenPanelsBorder, hidePanels, isPanelShown, panelIds, panelTabs, restorePanelSizes, revealTab, tabsetOf, terminalTabs, terminalTabset, type PanelId } from './dockPanels';
+import SettingsDialog from './SettingsDialog';
+import { dockPanel, documentTabset, getTab, hiddenPanelsBorder, hidePanels, isPanelShown, navigationPanelIds, panelIds, panelTabs, restorePanelSizes, revealTab, tabsetOf, terminalTabs, terminalTabset, type PanelId } from './dockPanels';
 import { LanguageWorkspace, languageFeature, languageFeatures, languageId, type Definition, type LanguageFeature, type LanguageOptions, type Problem } from './language';
 import type { EditorJump } from './Editor';
-import { activateWorkspace, fileName, indexFiles, languageName, mutateEntry, native, pickWorkspace, readFile, withinEntry, writeFile, type FileEntry, type FileOperation, type OpenFile } from './workspace';
+import { activateWorkspace, fileName, indexFiles, isImagePath, languageName, mutateEntry, native, pickWorkspace, readFile, withinEntry, writeFile, type FileEntry, type FileOperation, type OpenFile } from './workspace';
 
 const LAYOUT_KEY = 'leve.layout.v1';
 const LANGUAGE_KEY = 'leve.language-projects.v1';
+const workspaceMenuClassName = (name: string) => `${name} ${name.replace('flexlayout__', 'workspace-menu-')}`;
 type LanguagePreference = { path: string; options: LanguageOptions };
 const defaultLanguageOptions: LanguageOptions = { python: false, typescript: false, javascript: false, eslint: false };
 const featureKeys = Object.keys(languageFeatures) as LanguageFeature[];
@@ -110,7 +113,6 @@ function loadLayout(savedLayout?: IJsonModel, restoredFiles?: Set<string>) {
 }
 
 export default function App() {
-  const { theme, setTheme } = useTheme();
   const [model, setModel] = useState(loadLayout);
   const [root, setRoot] = useState<string | null>(null);
   const [enabledLanguageProjects, setEnabledLanguageProjects] = useState(languageProjects);
@@ -127,6 +129,8 @@ export default function App() {
   const [gitRevision, setGitRevision] = useState(0);
   const [notice, setNotice] = useState('');
   const [settings, setSettings] = useState(false);
+  const [explorerPreferences, setExplorerPreferences] = useState(loadExplorerPreferences);
+  useEffect(() => saveExplorerPreferences(explorerPreferences), [explorerPreferences]);
   const [projects, setProjects] = useState(loadProjects);
   const [projectMenu, setProjectMenu] = useState(false);
   const [titleMenu, setTitleMenu] = useState<{ name: 'File' | 'View'; origin: HTMLButtonElement } | null>(null);
@@ -143,6 +147,7 @@ export default function App() {
   const [jump, setJump] = useState<EditorJump | null>(null);
   const [position, setPosition] = useState({ line: 1, col: 1 });
   const [activeFile, setActiveFile] = useState('');
+  const activeImage = Object.hasOwn(files, activeFile) && files[activeFile].image === true;
   const [sessionReady, setSessionReady] = useState(false);
   const [recoveryBlocked, setRecoveryBlocked] = useState('');
   const [recoveryWarning, setRecoveryWarning] = useState('');
@@ -198,7 +203,7 @@ export default function App() {
       return next;
     });
   }, []);
-  const problemsFile = activeFile && Object.hasOwn(files, activeFile) ? activeFile : '';
+  const problemsFile = !activeImage && Object.hasOwn(files, activeFile) ? activeFile : '';
   const problems = useMemo(() => (problemsByFile[problemsFile] ?? [])
     .filter(problem => {
       if (problem.source === 'ESLint') return languageOptions.eslint;
@@ -283,12 +288,15 @@ export default function App() {
     opening.current.add(path);
     const currentGeneration = generation.current;
     try {
-      const content = await readFile(path);
+      const name = fileName(path);
+      const image = isImagePath(path);
+      const content = image ? '' : await readFile(path);
       if (generation.current !== currentGeneration) return;
-      setFiles(previous => ({ ...previous, [path]: { path, name: fileName(path), content, saved: content } }));
+      const file: OpenFile = { path, name, content, saved: content, ...(image ? { image: true } : {}) };
+      setFiles(previous => ({ ...previous, [path]: file }));
       const target = documentTabset(model);
       if (target) {
-        model.doAction(Actions.addNode({ type: 'tab', id, name: fileName(path), component: 'file', config: { path } }, target.getId(), DockLocation.CENTER, -1));
+        model.doAction(Actions.addNode({ type: 'tab', id, name, component: 'file', config: { path } }, target.getId(), DockLocation.CENTER, -1));
         const opened = getTab(model, id);
         if (opened && !isPanelShown(model, opened)) revealTab(model, opened);
       }
@@ -315,7 +323,7 @@ export default function App() {
     if (fileBusyRef.current) return;
     if (recoveryBlocked) { notify('Reopen the original project before saving recovered changes to disk.'); return; }
     const file = filesRef.current[path];
-    if (!file || file.content === file.saved || saving.current.has(path)) return;
+    if (!file || file.image || file.content === file.saved || saving.current.has(path)) return;
     saving.current.add(path);
     const currentGeneration = generation.current;
     try {
@@ -452,9 +460,10 @@ export default function App() {
 
   useEffect(() => {
     const handle = (event: KeyboardEvent) => {
+      if (settings) return;
       if (event.key === 'Escape') { setTerminalMenu(null); setProjectMenu(false); if (projectMenu) projectPicker.current?.focus(); }
       if (!(event.ctrlKey || event.metaKey)) return;
-      if (event.key.toLowerCase() === 's') { event.preventDefault(); if (activeFile) void saveFile(activeFile); }
+      if (event.key.toLowerCase() === 's') { event.preventDefault(); if (activeFile && !activeImage) void saveFile(activeFile); }
       if (event.key.toLowerCase() === 'p') {
         setSearchMode('files');
         event.preventDefault(); showPanel('search');
@@ -518,7 +527,7 @@ export default function App() {
 
   const factory = (node: TabNode): ReactNode => {
     switch (node.getComponent()) {
-      case 'explorer': return <Explorer root={root} blocked={!!recoveryBlocked} visible={node.isSelected() && isPanelShown(model, node)} refresh={refresh} reveal={reveal} decorations={decorations} onRefresh={() => setRefresh(value => value + 1)} onOpen={path => void openFile(path)} onFolder={() => void openFolder()} onOperation={(operation, returnFocus) => {
+      case 'explorer': return <Explorer root={root} blocked={!!recoveryBlocked} visible={node.isSelected() && isPanelShown(model, node)} refresh={refresh} reveal={reveal} decorations={decorations} preferences={explorerPreferences} onRefresh={() => setRefresh(value => value + 1)} onOpen={path => void openFile(path)} onFolder={() => void openFolder()} onOperation={(operation, returnFocus) => {
         fileOperationFocus.current = returnFocus ?? null;
         setFileOperation(operation);
         setFileError('');
@@ -539,6 +548,9 @@ export default function App() {
       case 'file': {
         const file = files[node.getConfig().path];
         if (!file) return null;
+        if (file.image) return recoveryBlocked
+          ? <p className="panel-description">Reopen the project to preview this image.</p>
+          : <ImagePreview key={file.path} path={file.path} name={file.name} root={root} />;
         const feature = languageFeature(languageId(file.path));
         return <Suspense fallback={<p className="panel-description">Loading editor…</p>}><Editor file={file} jump={jump?.path === file.path ? jump : null}
           active={activeFile === file.path} languageWorkspace={languageWorkspace}
@@ -579,6 +591,23 @@ export default function App() {
     if (tab && isPanelShown(model, tab)) hidePanels(model, [tab]);
     else showPanel(id);
   };
+  const sidebarTabs = navigationPanelIds.map(id => getTab(model, id)).filter(tab => tab !== undefined);
+  const sidebarShown = sidebarTabs.some(tab => isPanelShown(model, tab));
+  const toggleSidebar = () => {
+    const docked = sidebarTabs.filter(tab => tabsetOf(tab));
+    if (sidebarShown) {
+      hidePanels(model, docked, true);
+      return;
+    }
+    restorePanelSizes(model);
+    if (docked.length) return;
+
+    const hidden = sidebarTabs.filter(tab => tab.getConfig()?.leveDock?.sidebar);
+    const tabs = hidden.length ? hidden : navigationPanelIds.map(id => getTab(model, id) ?? panelTabs[id]);
+    tabs.forEach(tab => dockPanel(model, tab, false));
+    const selected = hidden.find(tab => tab.getConfig()?.leveDock?.selected) ?? getTab(model, 'explorer');
+    if (selected) revealTab(model, selected);
+  };
   const toggleTerminal = (origin: HTMLElement) => {
     const tabs = terminalTabs(model);
     if (tabs.some(tab => isPanelShown(model, tab))) hidePanels(model, tabs);
@@ -600,6 +629,11 @@ export default function App() {
       <div className="titlebar-start" data-tauri-drag-region={native ? '' : undefined}>
         <div className="app-name"><Code2 size={18} /><strong>leve</strong><span className="preview-tag">{native ? `v${version}` : 'preview'}</span></div>
         <nav className="titlebar-menus" aria-label="Application menus" data-tauri-drag-region="false">
+          <button className="sidebar-toggle" data-tauri-drag-region="false" type="button"
+            aria-label={sidebarShown ? 'Hide sidebar' : 'Show sidebar'} title={sidebarShown ? 'Hide sidebar' : 'Show sidebar'}
+            aria-expanded={sidebarShown} onClick={toggleSidebar}>
+            {sidebarShown ? <PanelLeftClose size={16} /> : <PanelLeft size={16} />}
+          </button>
           {(['File', 'View'] as const).map(name => <button key={name} data-tauri-drag-region="false" aria-haspopup="menu" aria-expanded={titleMenu?.name === name} onClick={event => {
             const origin = event.currentTarget;
             setTitleMenu(current => current?.name === name ? null : { name, origin });
@@ -608,7 +642,7 @@ export default function App() {
       </div>
       <button ref={projectPicker} className="project-picker" data-tauri-drag-region="false" title={root || 'Switch project'} aria-haspopup="menu" aria-expanded={projectMenu} aria-controls={projectMenu ? 'project-menu' : undefined} disabled={switchingProject} onClick={() => setProjectMenu(value => !value)}><Folder size={13} /><span>{root ? fileName(root) : 'No folder open'}</span><ChevronDown size={12} /></button>
       <div className="titlebar-actions" data-tauri-drag-region="false">
-        <button className="icon-button" title="Layout and shortcuts" onClick={() => setSettings(true)}><Settings2 size={16} /></button>
+        <button className="icon-button" title="Open settings" onClick={() => setSettings(true)}><Settings2 size={16} /></button>
         {native && <WindowControls report={notify} />}
       </div>
     </header>
@@ -661,6 +695,7 @@ export default function App() {
     />
       {tabMenu && model.getNodeById(tabMenu.tab.getId()) === tabMenu.tab && <PopupMenu
         anchor={tabMenu.anchor} container={tabMenu.tab.getLayoutRef() ?? undefined} returnFocusTo={tabMenu.origin}
+        classNameMapper={workspaceMenuClassName}
         title="Tab actions" items={[{ key: 'close', label: 'Close tab', icon: <X size={14} />, onSelect: () => closeTab(tabMenu.tab) }]}
         onClose={() => setTabMenu(null)}
       />}
@@ -668,13 +703,13 @@ export default function App() {
     {titleMenu && appShell.current && <PopupMenu
       anchor={{ x: titleMenu.origin.getBoundingClientRect().left, y: titleMenu.origin.getBoundingClientRect().bottom }}
       container={appShell.current} returnFocusTo={titleMenu.origin} title={titleMenu.name}
-      classNameMapper={name => `${name} ${name.replace('flexlayout__', 'title-menu-')}`}
+      classNameMapper={workspaceMenuClassName}
       onClose={() => setTitleMenu(null)}
       items={titleMenu.name === 'File' ? [
         { key: 'open', label: 'Open folder…', icon: <FolderOpen size={14} />, onSelect: () => void openFolder() },
         { key: 'recent', label: 'Recent projects…', icon: <Folder size={14} />, onSelect: () => requestAnimationFrame(() => setProjectMenu(true)) },
         { type: 'divider', key: 'files' },
-        { key: 'save', label: 'Save file', disabled: !activeFile, onSelect: () => void saveFile(activeFile) },
+        { key: 'save', label: 'Save file', disabled: !activeFile || activeImage, onSelect: () => void saveFile(activeFile) },
       ] : [
         { key: 'restore', label: 'Restore workspace', icon: <LayoutTemplate size={14} />, onSelect: restoreWorkspace },
         { type: 'divider', key: 'panels' },
@@ -685,7 +720,7 @@ export default function App() {
         { key: 'terminal', label: `${terminalShown ? 'Hide' : 'Show'} Terminal`, icon: <Check size={14} visibility={terminalShown ? 'visible' : 'hidden'} />, onSelect: () => toggleTerminal(titleMenu.origin) },
       ]}
     />}
-    <footer className="statusbar"><span className="status-indicator" />{native ? 'Local' : 'Web preview'}<span className="status-divider" /><span>{root ? fileName(root) : 'Demo project'}</span><div className="status-spacer" /><span title={checkpointTime ? `Last recovery checkpoint: ${checkpointTime}` : 'Preparing recovery'}>{recoveryError || recoveryLocked ? 'Recovery unavailable' : checkpointTime ? 'Recovery saved' : 'Recovery pending'}</span><span>Ln {position.line}, Col {position.col}</span><span>UTF-8</span><span>{activeFile ? languageName(activeFile) : 'Leve'}</span></footer>
+    <footer className="statusbar"><span className="status-indicator" />{native ? 'Local' : 'Web preview'}<span className="status-divider" /><span>{root ? fileName(root) : 'Demo project'}</span><div className="status-spacer" /><span title={checkpointTime ? `Last recovery checkpoint: ${checkpointTime}` : 'Preparing recovery'}>{recoveryError || recoveryLocked ? 'Recovery unavailable' : checkpointTime ? 'Recovery saved' : 'Recovery pending'}</span>{activeImage ? <span>Image · Read-only</span> : <><span>Ln {position.line}, Col {position.col}</span><span>UTF-8</span><span>{activeFile ? languageName(activeFile) : 'Leve'}</span></>}</footer>
     {(!sessionReady || closing) && <div className="session-loading" role="status">{closing ? 'Saving session…' : 'Restoring session…'}</div>}
     {notice && <div className="toast" role="status"><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={15} /></button></div>}
     {fileOperation && <FileDialog key={JSON.stringify(fileOperation)} operation={fileOperation} dirtyCount={'entry' in fileOperation ? Object.values(files).filter(file => withinEntry(file.path, fileOperation.entry.path) && file.content !== file.saved).length : 0} busy={fileBusy} error={fileError} onCancel={() => {
@@ -718,31 +753,11 @@ export default function App() {
         <p>{!native ? 'Preview only. Run real shells in the desktop app.' : !root ? 'Starts immediately in your home folder.' : 'Starts immediately in your project folder.'}</p>
       </div>
     </div>}
-    {settings && <div className="modal-backdrop" onClick={() => setSettings(false)}><section className="settings-modal" role="dialog" aria-modal="true" aria-label="Layout and shortcuts" onClick={event => event.stopPropagation()}>
-      <div className="modal-heading"><h2>Your workspace</h2><button className="icon-button" aria-label="Close settings" onClick={() => setSettings(false)}><X size={18} /></button></div>
-      <fieldset className="language-settings">
-        <legend>Language support</legend>
-        <div className="language-options">{featureKeys.map(feature => <label key={feature}>
-          <input type="checkbox" checked={languageOptions[feature]} disabled={!languageWorkspace} onChange={event => toggleLanguageSupport(feature, event.target.checked)} />
-          {languageFeatures[feature]}
-        </label>)}</div>
-        <p>Options apply to the open project. ESLint uses the project's installation and checks the active JavaScript or TypeScript file as you edit.</p>
-        <p>Enable only for projects you trust. Analysis tools can run project configuration and plugins.</p>
-        <p><kbd>Ctrl+Space</kbd> Complete <kbd>F12</kbd> Go to Definition <kbd>Ctrl+Shift+M</kbd> Diagnostics</p>
-      </fieldset>
-      <fieldset className="theme-picker"><legend>Appearance</legend><div className="theme-options">
-        <label className={theme === 'dark' ? 'theme-option selected' : 'theme-option'}><input type="radio" name="theme" value="dark" checked={theme === 'dark'} onChange={() => setTheme('dark')} /><span>Dark</span></label>
-        <label className={theme === 'light' ? 'theme-option selected' : 'theme-option'}><input type="radio" name="theme" value="light" checked={theme === 'light'} onChange={() => setTheme('light')} /><span>Light</span></label>
-      </div><p>Your preference is saved automatically.</p></fieldset>
-      <p>Drag tabs to move panels. Drop at the edges to split the area, or onto another group to combine tabs.</p>
-      <button className="button" onClick={() => {
+    {settings && <SettingsDialog explorerPreferences={explorerPreferences} onExplorerChange={setExplorerPreferences} languageOptions={languageOptions} hasProject={!!languageWorkspace}
+      onLanguageChange={toggleLanguageSupport} onClose={() => setSettings(false)} onResetLayout={() => {
         const fresh = Model.fromJson(initialLayout());
         Object.values(filesRef.current).forEach(file => fresh.doAction(Actions.addNode({ type: 'tab', id: `file:${file.path}`, component: 'file', name: file.name, config: { path: file.path } }, 'documents', DockLocation.CENTER, -1)));
         setModel(fresh); persist(fresh); setSettings(false);
-      }}><LayoutTemplate size={16} /> Reset layout</button>
-      <div className="settings-shortcuts"><Keyboard size={17} /><span>Ctrl+P · Find file<br />Ctrl+S · Save<br />Ctrl+F · Search in code<br />Ctrl+` · New terminal</span></div>
-      <p className="subtle">Ctrl+Shift+F · Search project contents</p>
-      <p className="subtle">Resetting the layout closes open terminal sessions. Files and editor changes are preserved.</p>
-    </section></div>}
+      }} />}
   </div>;
 }

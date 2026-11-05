@@ -12,9 +12,10 @@ use portable_pty::{native_pty_system, Child, MasterPty, PtySize};
 use portable_pty::CommandBuilder;
 use serde::Serialize;
 use std::{collections::HashMap, fs, io::{Read, Write}, path::{Path, PathBuf}, sync::Mutex};
-use tauri::{ipc::Channel, Manager, State};
+use tauri::{ipc::{Channel, Response}, Manager, State};
 
 const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024;
+const MAX_IMAGE_SIZE: u64 = 20 * 1024 * 1024;
 
 struct TerminalSession {
     master: Box<dyn MasterPty + Send>,
@@ -67,7 +68,7 @@ fn text_file(path: &Path) -> Result<String, String> {
     let mut data = Vec::new();
     fs::File::open(path).map_err(error)?.take(MAX_FILE_SIZE + 1).read_to_end(&mut data).map_err(error)?;
     if data.len() as u64 > MAX_FILE_SIZE { return Err("This version opens text files up to 4 MB.".into()); }
-    if data.contains(&0) { return Err("Binary files are not supported yet.".into()); }
+    if data.contains(&0) { return Err("This binary file format is not supported.".into()); }
     String::from_utf8(data).map_err(|_| "This version supports UTF-8 files.".into())
 }
 
@@ -108,6 +109,23 @@ async fn list_directory(path: String, state: State<'_, Workspace>) -> Result<Vec
 #[tauri::command]
 async fn read_file(path: String, state: State<'_, Workspace>) -> Result<String, String> {
     text_file(&resolve(&workspace_root(&state)?, &path)?)
+}
+
+fn image_file(path: &Path) -> Result<Vec<u8>, String> {
+    let metadata = fs::metadata(path).map_err(error)?;
+    if !metadata.is_file() { return Err("The path is not a file.".into()); }
+    if metadata.len() > MAX_IMAGE_SIZE { return Err("Image previews support files up to 20 MB.".into()); }
+    let mut data = Vec::new();
+    fs::File::open(path).map_err(error)?.take(MAX_IMAGE_SIZE + 1).read_to_end(&mut data).map_err(error)?;
+    if data.len() as u64 > MAX_IMAGE_SIZE { return Err("Image previews support files up to 20 MB.".into()); }
+    Ok(data)
+}
+
+#[tauri::command]
+async fn read_image(path: String, expected_root: String, state: State<'_, Workspace>) -> Result<Response, String> {
+    let root = files::current_root(&state, &expected_root)?;
+    let path = files::checked_path(&root, &path)?;
+    tauri::async_runtime::spawn_blocking(move || image_file(&path).map(Response::new)).await.map_err(error)?
 }
 
 fn save_checked(path: &Path, content: &str, expected: &str) -> Result<(), String> {
@@ -185,7 +203,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Workspace::default())
         .manage(session::SessionStore::default())
-        .invoke_handler(tauri::generate_handler![set_workspace, list_directory, read_file, write_file, files::create_entry, files::rename_entry, files::delete_entry, search::search_content, search::cancel_search, git::git_status, git::git_diff, shells::list_shells, terminal_start, terminal_write, terminal_resize, terminal_close, session::session_load, session::session_save, language::lsp_start, language::lsp_send, language::lsp_stop, language::lsp_document, language::lsp_resolve, language::eslint_check])
+        .invoke_handler(tauri::generate_handler![set_workspace, list_directory, read_file, read_image, write_file, files::create_entry, files::rename_entry, files::delete_entry, search::search_content, search::cancel_search, git::git_status, git::git_diff, shells::list_shells, terminal_start, terminal_write, terminal_resize, terminal_close, session::session_load, session::session_save, language::lsp_start, language::lsp_send, language::lsp_stop, language::lsp_document, language::lsp_resolve, language::eslint_check])
         .build(tauri::generate_context!())
         .expect("Could not start Leve")
         .run(|app, event| {
@@ -208,6 +226,17 @@ mod tests {
         fs::write(base.path().join("outside.txt"), "private").unwrap();
         let root = root.canonicalize().unwrap();
         assert!(resolve(&root, "../outside.txt").is_err());
+    }
+
+    #[test]
+    fn reads_binary_image_bytes_and_rejects_files_over_the_preview_limit() {
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("image.png");
+        let bytes = include_bytes!("../icons/256x256.png");
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(image_file(&path).unwrap().as_slice(), bytes);
+        fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(MAX_IMAGE_SIZE + 1).unwrap();
+        assert!(image_file(&path).unwrap_err().contains("20 MB"));
     }
 
     #[test]

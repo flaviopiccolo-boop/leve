@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { ChevronDown, ChevronRight, FileCode2, FilePlus2, Folder, FolderOpen, FolderPlus, MoreHorizontal, RefreshCw, X } from 'lucide-react';
-import { fileName, listFiles, native, type FileEntry, type FileOperation } from './workspace';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
+import { ChevronDown, FilePlus2, FolderOpen, FolderPlus, MoreHorizontal, RefreshCw, X } from 'lucide-react';
+import { fileName, listFiles, native, sortEntries, type FileEntry, type FileOperation } from './workspace';
 import { gitStatuses, type GitDecorations } from './Git';
+import ExplorerEntryIcons from './ExplorerEntryIcons';
+import type { ExplorerPreferences } from './explorerPreferences';
 
 type StartOperation = (operation: FileOperation, returnFocus?: HTMLElement | null) => void;
 const TYPEAHEAD_TIMEOUT = 750;
@@ -11,13 +13,16 @@ function searchName(value: string) {
   return value.normalize('NFD').replace(/\p{Mark}/gu, '').toLowerCase();
 }
 
-function Tree({ path = '', depth = 0, refresh, live, reveal, decorations, onOpen, onMenu, onOperation }: {
+function Tree({ path = '', depth = 0, refresh, live, reveal, decorations, preferences, onOpen, onMenu, onOperation }: {
   path?: string; depth?: number; refresh: number; live: boolean; reveal: string; decorations: GitDecorations;
+  preferences: ExplorerPreferences;
   onOpen: (path: string) => void;
   onMenu: (entry: FileEntry, x: number, y: number) => void;
   onOperation?: StartOperation;
 }) {
   const [entries, setEntries] = useState<FileEntry[]>([]);
+  const { foldersFirst, gitIndicators, icons } = preferences;
+  const orderedEntries = useMemo(() => foldersFirst ? entries : sortEntries([...entries], false), [entries, foldersFirst]);
   const [expanded, setExpanded] = useState(new Set(['src']));
   const [error, setError] = useState('');
   useEffect(() => {
@@ -94,30 +99,30 @@ function Tree({ path = '', depth = 0, refresh, live, reveal, decorations, onOpen
         break;
     }
   };
-  return <>{error && <p className="inline-error">{error}</p>}{entries.map(entry => {
-    const fileStatus = decorations.files.get(entry.path);
-    const folderStatus = entry.directory ? decorations.folders.get(entry.path) : undefined;
+  return <>{error && <p className="inline-error">{error}</p>}{orderedEntries.map(entry => {
+    const fileStatus = gitIndicators ? decorations.files.get(entry.path) : undefined;
+    const folderStatus = gitIndicators && entry.directory ? decorations.folders.get(entry.path) : undefined;
     const status = fileStatus ?? folderStatus;
     const label = fileStatus ? gitStatuses[fileStatus].label : folderStatus ? 'Contains Git changes' : undefined;
     return <div key={entry.path}>
     <div className="tree-row" onContextMenu={event => onMenu(entry, event.clientX, event.clientY)}>
-      <button className="tree-item" style={{ paddingLeft: 12 + depth * 15 }} title={entry.path} aria-expanded={entry.directory ? expanded.has(entry.path) : undefined}
+      <button className="tree-item" style={{ '--tree-indent': `${depth * 15}px` } as CSSProperties} title={entry.path} aria-expanded={entry.directory ? expanded.has(entry.path) : undefined}
         aria-description={label} aria-keyshortcuts={onOperation ? 'Delete F2 Shift+F10' : undefined} onKeyDown={event => handleEntryKey(event, entry)} onClick={() => {
         if (!entry.directory) onOpen(entry.path);
         else setExpanded(previous => { const next = new Set(previous); if (next.has(entry.path)) next.delete(entry.path); else next.add(entry.path); return next; });
       }}>
-        {entry.directory ? <>{expanded.has(entry.path) ? <ChevronDown size={12} /> : <ChevronRight size={12} />}<Folder size={15} className="folder-icon" /></> : <><span className="tree-spacer" /><FileCode2 size={14} className={entry.name.endsWith('.py') ? 'python-icon' : 'file-icon'} /></>}
+        <ExplorerEntryIcons name={entry.name} directory={entry.directory} expanded={expanded.has(entry.path)} style={icons} />
         <span className="tree-name" data-git-status={status}>{entry.name}</span>
         {status && <span className="tree-git-badge" data-git-status={status} title={label} aria-hidden="true">{fileStatus ? gitStatuses[fileStatus].badge : '●'}</span>}
       </button>
       <button className="icon-button tree-more" aria-label={`Actions for ${entry.path}`} onClick={event => { const rect = event.currentTarget.getBoundingClientRect(); onMenu(entry, rect.left, rect.bottom); }}><MoreHorizontal size={14} /></button>
     </div>
-    {entry.directory && expanded.has(entry.path) && <Tree path={entry.path} depth={depth + 1} refresh={refresh} live={live} reveal={reveal} decorations={decorations} onOpen={onOpen} onMenu={onMenu} onOperation={onOperation} />}
+    {entry.directory && expanded.has(entry.path) && <Tree path={entry.path} depth={depth + 1} refresh={refresh} live={live} reveal={reveal} decorations={decorations} preferences={preferences} onOpen={onOpen} onMenu={onMenu} onOperation={onOperation} />}
     </div>;
   })}</>;
 }
 
-export default function Explorer({ root, blocked, visible, refresh, reveal, decorations, onRefresh, onOpen, onFolder, onOperation }: { root: string | null; blocked: boolean; visible: boolean; refresh: number; reveal: string; decorations: GitDecorations; onRefresh: () => void; onOpen: (path: string) => void; onFolder: () => void; onOperation: StartOperation }) {
+export default function Explorer({ root, blocked, visible, refresh, reveal, decorations, preferences, onRefresh, onOpen, onFolder, onOperation }: { root: string | null; blocked: boolean; visible: boolean; refresh: number; reveal: string; decorations: GitDecorations; preferences: ExplorerPreferences; onRefresh: () => void; onOpen: (path: string) => void; onFolder: () => void; onOperation: StartOperation }) {
   const [menu, setMenu] = useState<{ entry: FileEntry | null; left: number; top: number } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuOrigin = useRef<HTMLElement | null>(null);
@@ -188,11 +193,11 @@ export default function Explorer({ root, blocked, visible, refresh, reveal, deco
       <button className="icon-button" title="Open folder" onClick={onFolder}><FolderOpen size={15} /></button>
     </div></div>
     <div className="project-heading"><ChevronDown size={13} /><span>{root ? fileName(root) : 'example-project'}</span>{!root && <span className="demo-badge">DEMO</span>}</div>
-    {blocked ? <p className="panel-description">Project unavailable. Recovered files remain open.</p> : <div className="explorer-tree"
+    {blocked ? <p className="panel-description">Project unavailable. Recovered files remain open.</p> : <div className="explorer-tree" data-density={preferences.density} data-indent-guides={preferences.indentGuides}
       onKeyDown={findTreeEntry}
       onPointerDown={() => { typeahead.current = null; }}
       onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) typeahead.current = null; }}>
-      <Tree key={root ?? 'demo'} refresh={refresh} live={native && !!root && visible} reveal={reveal} decorations={decorations} onOpen={onOpen} onMenu={openMenu} onOperation={enabled ? action : undefined} />
+      <Tree key={root ?? 'demo'} refresh={refresh} live={native && !!root && visible} reveal={reveal} decorations={decorations} preferences={preferences} onOpen={onOpen} onMenu={openMenu} onOperation={enabled ? action : undefined} />
     </div>}
     <div className="explorer-root-space" onContextMenu={event => openMenu(null, event.clientX, event.clientY)} />
     {menu && <div key={parent} ref={menuRef} className="terminal-menu file-menu" role="menu" aria-label={entry ? `Actions for ${entry.name}` : 'Project root actions'} style={{ left: menu.left, top: menu.top }} onKeyDown={event => {

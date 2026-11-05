@@ -165,6 +165,24 @@ test('recovers panels from a maximized Welcome using the activity bar or View', 
   await expect(maximize).toBeVisible();
 });
 
+test('the title bar collapses the sidebar and restores its selected tab', async ({ page }) => {
+  await page.goto('/');
+  await viewAction(page, 'Hide Git');
+  await page.getByRole('tab', { name: 'Search', exact: true }).click();
+  const editor = page.locator('.welcome');
+  const originalWidth = (await editor.boundingBox())!.width;
+
+  await page.getByRole('button', { name: 'Hide sidebar' }).click();
+  await expect(page.getByRole('tab', { name: 'Search', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('tab', { name: 'Problems' })).toBeVisible();
+  await expect.poll(async () => (await editor.boundingBox())!.width).toBeGreaterThan(originalWidth);
+
+  await page.getByRole('button', { name: 'Show sidebar' }).click();
+  await expect(page.getByRole('tab', { name: 'Search', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab', { name: 'Git', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Hide sidebar' })).toHaveAttribute('aria-expanded', 'true');
+});
+
 test('restores hidden panels after a reload without losing the open editor', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'main.py', exact: true }).click();
@@ -285,6 +303,85 @@ test('switches themes without losing edits or undo history and saves the prefere
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+});
+
+test('preset themes recolor the open editor and terminal and survive a reload', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'main.py', exact: true }).click();
+  const plus = page.getByRole('button', { name: 'New terminal', exact: true }).filter({ has: page.locator('svg.lucide-plus') });
+  await plus.click();
+  await page.getByRole('menuitem', { name: 'CMD', exact: true }).click();
+  const editor = page.locator('.cm-editor');
+  const terminal = page.locator('.xterm-scrollable-element');
+  await expect(terminal).toHaveCSS('background-color', 'rgb(24, 25, 28)');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('radio', { name: 'Midnight', exact: true }).check();
+  await expect(editor).toHaveCSS('background-color', 'rgb(12, 21, 36)');
+  await expect(terminal).toHaveCSS('background-color', 'rgb(10, 19, 32)');
+  await page.getByRole('radio', { name: 'Paper', exact: true }).check();
+  await expect(editor).toHaveCSS('background-color', 'rgb(255, 251, 241)');
+  await expect(terminal).toHaveCSS('background-color', 'rgb(251, 244, 231)');
+  await expect(page.locator('html')).toHaveCSS('color-scheme', 'light');
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'paper');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('radio', { name: 'Paper', exact: true })).toBeChecked();
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+});
+
+test('settings switch between sections and search for language options', async ({ page }) => {
+  await page.goto('/');
+  const settingsButton = page.getByRole('button', { name: 'Settings', exact: true });
+  await settingsButton.click();
+  const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+  await expect(dialog.getByRole('radio', { name: 'Dark', exact: true })).toBeChecked();
+  await dialog.getByRole('button', { name: 'Workspace layout' }).click();
+  await expect(dialog.getByRole('button', { name: 'Reset layout' })).toBeVisible();
+  const search = dialog.getByRole('searchbox', { name: 'Search settings' });
+  await search.fill('typescript');
+  await expect(dialog.getByRole('button', { name: 'Language support' })).toHaveAttribute('aria-current', 'page');
+  await expect(dialog.getByRole('checkbox', { name: 'TypeScript', exact: true })).toBeDisabled();
+  await search.clear();
+  await dialog.getByRole('button', { name: 'Keyboard shortcuts' }).click();
+  await expect(dialog.getByText('Ctrl+Shift+F', { exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(settingsButton).toBeFocused();
+});
+
+test('Explorer preferences update the preview and persist in the project tree', async ({ page }) => {
+  await page.goto('/');
+  const tree = page.locator('.explorer-tree');
+  await expect(tree.locator('.tree-name').first()).toHaveText('src');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+  await dialog.getByRole('button', { name: 'Explorer', exact: true }).click();
+  const preview = dialog.getByRole('region', { name: 'Explorer preview' });
+  const style = dialog.getByLabel('File icon style');
+  await style.selectOption('colorful');
+  const pythonIcon = preview.getByText('main.py', { exact: true }).locator('..').locator('.tree-entry-icon');
+  await expect(pythonIcon).toHaveClass(/tree-icon-blue/);
+  await expect(preview.getByText('settings.json', { exact: true }).locator('..').locator('.tree-entry-icon')).toHaveClass(/lucide-file-json2/);
+  await style.selectOption('none');
+  await expect(preview.locator('.tree-entry-icon')).toHaveCount(0);
+  await expect(preview.locator('.tree-chevron')).toBeVisible();
+  await style.selectOption('monochrome');
+  await expect(pythonIcon).toHaveClass(/file-icon/);
+  await dialog.getByLabel('Row density').selectOption('compact');
+  await dialog.getByRole('checkbox', { name: 'Indent guides' }).check();
+  await dialog.getByRole('checkbox', { name: 'Folders first' }).uncheck();
+  await dialog.getByRole('checkbox', { name: 'Git indicators' }).uncheck();
+  await expect(preview.locator('.tree-name').first()).toHaveText('logo.png');
+  await expect(preview.locator('.tree-git-badge')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Close settings' }).click();
+
+  await expect(tree.locator('.tree-name').first()).toHaveText('.gitignore');
+  await page.reload();
+  const main = tree.getByRole('button', { name: 'main.py', exact: true });
+  await expect(main).toHaveCSS('height', '23px');
+  await expect(main.locator('.tree-entry-icon')).toHaveClass(/file-icon/);
+  await expect(tree).toHaveAttribute('data-indent-guides', 'true');
 });
 
 test('the plus button opens a shell picker and creates the selected terminal tab', async ({ page }) => {
