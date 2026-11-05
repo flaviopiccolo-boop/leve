@@ -7,7 +7,7 @@ import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
 import { languageName, type OpenFile } from './workspace';
 import { languageError, languageFeature, languageFeatures, languageId, type Definition, type LanguageWorkspace, type Problem } from './language';
-import { useTheme, type Theme } from './theme';
+import { themePresets, useTheme, type Theme } from './theme';
 
 const editorTheme = (mode: Theme) => EditorView.theme({
   '&': { height: '100%', backgroundColor: 'var(--panel)', color: 'var(--text)', fontSize: '13px' },
@@ -19,7 +19,7 @@ const editorTheme = (mode: Theme) => EditorView.theme({
   '.cm-cursor': { borderLeftColor: 'var(--accent)' },
   '&.cm-focused': { outline: 'none' },
   '.cm-panels': { backgroundColor: 'var(--chrome)', color: 'var(--text)' },
-}, { dark: mode === 'dark' });
+}, { dark: themePresets[mode].scheme === 'dark' });
 
 const highlighting = HighlightStyle.define([
   { tag: tags.keyword, color: 'var(--syntax-keyword)' },

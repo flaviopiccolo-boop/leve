@@ -16,8 +16,8 @@ export const demoFiles: Record<string, string> = {
 let demo = { ...demoFiles };
 const demoFolders = new Set(['src', 'src/services']);
 let workspaceSelected = false;
-export function sortEntries(entries: FileEntry[]) {
-  return entries.sort((a, b) => Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name));
+export function sortEntries<T extends FileEntry>(entries: T[], foldersFirst = true) {
+  return entries.sort((a, b) => (foldersFirst ? Number(b.directory) - Number(a.directory) : 0) || a.name.localeCompare(b.name));
 }
 export async function pickWorkspace(): Promise<string | null> {
   if (!native) return null;

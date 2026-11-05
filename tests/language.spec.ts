@@ -85,6 +85,7 @@ test('shares the TypeScript server with JavaScript and integrates ESLint, comple
   await page.keyboard.press('F12');
   await expect(page.getByText('Enable TypeScript in Settings → Language support to use Go to Definition.')).toBeVisible();
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Language support', exact: true }).click();
   await page.getByRole('checkbox', { name: 'TypeScript', exact: true }).check();
   await page.getByRole('checkbox', { name: 'ESLint', exact: true }).check();
   await page.getByRole('button', { name: 'Close settings' }).click();
@@ -145,6 +146,7 @@ test('shares the TypeScript server with JavaScript and integrates ESLint, comple
   await expect(problems).not.toContainText('TypeScript: Type mismatch');
   await expect(problemsTab).toHaveText('Problems 1');
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Language support', exact: true }).click();
   await page.getByRole('checkbox', { name: 'JavaScript', exact: true }).check();
   await page.getByRole('checkbox', { name: 'ESLint', exact: true }).uncheck();
   await page.getByRole('button', { name: 'Close settings' }).click();
@@ -162,6 +164,7 @@ test('shares the TypeScript server with JavaScript and integrates ESLint, comple
   await page.evaluate(() => { (window as any).languageCalls.failPython = true; });
   await page.getByRole('button', { name: 'view.py', exact: true }).click();
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Language support', exact: true }).click();
   await page.getByRole('checkbox', { name: 'Python', exact: true }).check();
   await page.getByRole('button', { name: 'Close settings' }).click();
   await expect(page.getByText('Pyright was not found.')).toBeVisible();
@@ -170,6 +173,7 @@ test('shares the TypeScript server with JavaScript and integrates ESLint, comple
   await expect(page.getByText('Pyright was not found.')).toBeVisible();
   expect((await calls()).starts).toEqual(['typescript', 'python']);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Language support', exact: true }).click();
   await page.getByRole('checkbox', { name: 'TypeScript', exact: true }).uncheck();
   expect((await calls()).stops).not.toContain('typescript');
   await page.getByRole('checkbox', { name: 'JavaScript', exact: true }).uncheck();

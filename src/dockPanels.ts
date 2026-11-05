@@ -7,7 +7,7 @@ export const panelTabs = {
   problems: { type: 'tab', id: 'problems', name: 'Problems', component: 'problems', enableClose: false },
 } as const satisfies Record<string, IJsonTabNode>;
 export type PanelId = keyof typeof panelTabs;
-const navigationPanelIds = ['explorer', 'search', 'git'] as const;
+export const navigationPanelIds = ['explorer', 'search', 'git'] as const;
 export const panelIds = [...navigationPanelIds, 'problems'] as const;
 
 // Moving tabs here hides their UI without unmounting their contents or closing running shells.
@@ -57,13 +57,15 @@ export function revealTab(model: Model, tab: TabNode) {
   model.doAction(Actions.selectTab(tab.getId()));
 }
 
-export function hidePanels(model: Model, tabs: TabNode[]) {
+export function hidePanels(model: Model, tabs: TabNode[], sidebar = false) {
   const border = model.getNodeById('border_left');
   if (!(border instanceof BorderNode) || border.isShowing()) return;
   const actions = tabs.flatMap(tab => {
     const group = tabsetOf(tab);
     if (!group) return [];
-    const config = { ...tab.getConfig(), leveDock: { group: group.getId(), index: group.getChildren().indexOf(tab) } };
+    const config = { ...tab.getConfig(), leveDock: {
+      group: group.getId(), index: group.getChildren().indexOf(tab), sidebar, selected: tab.isSelected(),
+    } };
     return [Actions.updateNodeAttributes(tab.getId(), { config }), Actions.moveNode(tab.getId(), border.getId(), DockLocation.CENTER, -1, false)];
   });
   if (actions.length) model.doAction(Actions.group(actions));

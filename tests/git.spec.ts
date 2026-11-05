@@ -62,6 +62,13 @@ test('decorates nested Git changes and opens diffs without changing a dirty edit
   const untracked = page.getByRole('button', { name: 'new.txt', exact: true });
   await expect(untracked.locator('.tree-name')).toHaveCSS('color', 'rgb(115, 201, 145)');
   await expect(untracked.locator('.tree-git-badge')).toHaveText('U');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
+  await settings.getByRole('button', { name: 'Explorer', exact: true }).click();
+  await settings.getByRole('checkbox', { name: 'Git indicators' }).uncheck();
+  await settings.getByRole('button', { name: 'Close settings' }).click();
+  await expect(folder.locator('.tree-git-badge')).toHaveCount(0);
+  await expect(untracked.locator('.tree-name')).not.toHaveAttribute('data-git-status', '?');
   await changedFile.click();
   const editor = page.locator('.cm-content');
   await editor.click();
