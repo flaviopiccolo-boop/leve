@@ -5,13 +5,14 @@ import { gitStatuses, type GitDecorations } from './Git';
 
 type StartOperation = (operation: FileOperation, returnFocus?: HTMLElement | null) => void;
 const TYPEAHEAD_TIMEOUT = 750;
+const DIRECTORY_REFRESH_INTERVAL = 1500;
 
 function searchName(value: string) {
   return value.normalize('NFD').replace(/\p{Mark}/gu, '').toLowerCase();
 }
 
-function Tree({ path = '', depth = 0, refresh, reveal, decorations, onOpen, onMenu, onOperation }: {
-  path?: string; depth?: number; refresh: number; reveal: string; decorations: GitDecorations;
+function Tree({ path = '', depth = 0, refresh, live, reveal, decorations, onOpen, onMenu, onOperation }: {
+  path?: string; depth?: number; refresh: number; live: boolean; reveal: string; decorations: GitDecorations;
   onOpen: (path: string) => void;
   onMenu: (entry: FileEntry, x: number, y: number) => void;
   onOperation?: StartOperation;
@@ -21,10 +22,28 @@ function Tree({ path = '', depth = 0, refresh, reveal, decorations, onOpen, onMe
   const [error, setError] = useState('');
   useEffect(() => {
     let active = true;
-    setError('');
-    void listFiles(path).then(items => { if (active) setEntries(items); }).catch(err => { if (active) setError(String(err)); });
-    return () => { active = false; };
-  }, [path, refresh]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // Only mounted branches are read. Wait for each listing to finish before scheduling another.
+    const update = async (initial = false) => {
+      try {
+        if (initial || !document.hidden) {
+          const items = await listFiles(path);
+          if (!active) return;
+          setEntries(previous => previous.length === items.length && previous.every((entry, index) => {
+            const item = items[index];
+            return entry.path === item.path && entry.name === item.name && entry.directory === item.directory;
+          }) ? previous : items);
+          setError('');
+        }
+      } catch (err) {
+        if (active) setError(String(err));
+      } finally {
+        if (active && live) timer = setTimeout(() => void update(), DIRECTORY_REFRESH_INTERVAL);
+      }
+    };
+    void update(true);
+    return () => { active = false; clearTimeout(timer); };
+  }, [path, refresh, live]);
   useEffect(() => {
     if (reveal) setExpanded(previous => {
       const next = new Set(previous);
@@ -93,12 +112,12 @@ function Tree({ path = '', depth = 0, refresh, reveal, decorations, onOpen, onMe
       </button>
       <button className="icon-button tree-more" aria-label={`Actions for ${entry.path}`} onClick={event => { const rect = event.currentTarget.getBoundingClientRect(); onMenu(entry, rect.left, rect.bottom); }}><MoreHorizontal size={14} /></button>
     </div>
-    {entry.directory && expanded.has(entry.path) && <Tree path={entry.path} depth={depth + 1} refresh={refresh} reveal={reveal} decorations={decorations} onOpen={onOpen} onMenu={onMenu} onOperation={onOperation} />}
+    {entry.directory && expanded.has(entry.path) && <Tree path={entry.path} depth={depth + 1} refresh={refresh} live={live} reveal={reveal} decorations={decorations} onOpen={onOpen} onMenu={onMenu} onOperation={onOperation} />}
     </div>;
   })}</>;
 }
 
-export default function Explorer({ root, blocked, refresh, reveal, decorations, onRefresh, onOpen, onFolder, onOperation }: { root: string | null; blocked: boolean; refresh: number; reveal: string; decorations: GitDecorations; onRefresh: () => void; onOpen: (path: string) => void; onFolder: () => void; onOperation: StartOperation }) {
+export default function Explorer({ root, blocked, visible, refresh, reveal, decorations, onRefresh, onOpen, onFolder, onOperation }: { root: string | null; blocked: boolean; visible: boolean; refresh: number; reveal: string; decorations: GitDecorations; onRefresh: () => void; onOpen: (path: string) => void; onFolder: () => void; onOperation: StartOperation }) {
   const [menu, setMenu] = useState<{ entry: FileEntry | null; left: number; top: number } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuOrigin = useRef<HTMLElement | null>(null);
@@ -173,7 +192,7 @@ export default function Explorer({ root, blocked, refresh, reveal, decorations, 
       onKeyDown={findTreeEntry}
       onPointerDown={() => { typeahead.current = null; }}
       onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) typeahead.current = null; }}>
-      <Tree key={root ?? 'demo'} refresh={refresh} reveal={reveal} decorations={decorations} onOpen={onOpen} onMenu={openMenu} onOperation={enabled ? action : undefined} />
+      <Tree key={root ?? 'demo'} refresh={refresh} live={native && !!root && visible} reveal={reveal} decorations={decorations} onOpen={onOpen} onMenu={openMenu} onOperation={enabled ? action : undefined} />
     </div>}
     <div className="explorer-root-space" onContextMenu={event => openMenu(null, event.clientX, event.clientY)} />
     {menu && <div key={parent} ref={menuRef} className="terminal-menu file-menu" role="menu" aria-label={entry ? `Actions for ${entry.name}` : 'Project root actions'} style={{ left: menu.left, top: menu.top }} onKeyDown={event => {

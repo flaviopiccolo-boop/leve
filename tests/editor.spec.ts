@@ -1,4 +1,17 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
+
+async function dragTab(page: Page, tab: Locator, x: number, y: number) {
+  const from = (await tab.boundingBox())!;
+  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(x, y, { steps: 20 });
+  await page.mouse.up();
+}
+
+async function viewAction(page: Page, name: string) {
+  await page.getByRole('button', { name: 'View', exact: true }).click();
+  await page.getByRole('menu', { name: 'View', exact: true }).getByRole('menuitem', { name, exact: true }).click();
+}
 
 test.afterEach(async ({ page }) => {
   // Keep the browser's unsaved-changes prompt out of test teardown.
@@ -43,6 +56,7 @@ test('edits a file, marks it dirty, saves and preserves the session content afte
 
 test('finds nested files through Ctrl+P', async ({ page }) => {
   await page.goto('/');
+  await expect(page.locator('.statusbar')).toContainText('Recovery saved');
   await page.keyboard.press('Control+p');
   await expect(page.locator('#file-search')).toBeFocused();
   await page.locator('#file-search').fill('greeting');
@@ -62,14 +76,52 @@ test('preserves unsaved content when closing is cancelled', async ({ page }) => 
   await expect(page.getByRole('tab', { name: 'main.py', exact: true }).locator('.dirty-dot')).toHaveCount(1);
 });
 
+test('the tab context menu closes the clicked file and respects unsaved changes', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'main.py', exact: true }).click();
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('Control+End');
+  await page.keyboard.insertText('\n# unsaved draft');
+  const file = page.getByRole('tab', { name: 'main.py', exact: true });
+  const welcome = page.getByRole('tab', { name: 'Welcome', exact: true });
+  await welcome.click();
+  await file.click({ button: 'right' });
+  const menu = page.getByRole('menu', { name: 'Tab actions' });
+  await expect(menu.getByRole('menuitem', { name: 'Close tab' })).toBeFocused();
+  await expect(welcome).toHaveAttribute('aria-selected', 'true');
+  page.once('dialog', dialog => dialog.dismiss());
+  await page.keyboard.press('Enter');
+  await expect(file.locator('.dirty-dot')).toBeVisible();
+  await expect(menu).toHaveCount(0);
+  await file.click({ button: 'right' });
+  page.once('dialog', dialog => dialog.accept());
+  await menu.getByRole('menuitem', { name: 'Close tab' }).click();
+  await expect(file).toHaveCount(0);
+  await expect(welcome).toBeVisible();
+});
+
+test('middle click closes a terminal but leaves protected tabs open', async ({ page }) => {
+  await page.goto('/');
+  for (const name of ['Explorer', 'Search', 'Git', 'Welcome', 'Problems']) {
+    const tab = page.getByRole('tab', { name: new RegExp(`^${name}\\b`) });
+    await tab.click({ button: 'right' });
+    await expect(page.getByRole('menu', { name: 'Tab actions' })).toHaveCount(0);
+    await tab.click({ button: 'middle' });
+    await expect(tab).toBeVisible();
+  }
+  await page.getByRole('button', { name: 'New terminal', exact: true }).filter({ has: page.locator('svg.lucide-plus') }).click();
+  await page.getByRole('menuitem', { name: 'PowerShell', exact: true }).click();
+  const terminal = page.getByRole('tab', { name: 'PowerShell', exact: true });
+  await terminal.click({ button: 'middle' });
+  await expect(terminal).toHaveCount(0);
+  await expect(page.getByRole('tab', { name: 'Problems' })).toBeVisible();
+});
+
 test('moves the explorer to the right and restores the saved layout on reload', async ({ page }) => {
   await page.goto('/');
-  const tab = await page.locator('.flexlayout__tab_button').filter({ hasText: 'Explorer' }).boundingBox();
+  const tab = page.getByRole('tab', { name: 'Explorer', exact: true });
   const editor = await page.locator('.welcome').boundingBox();
-  await page.mouse.move(tab!.x + tab!.width / 2, tab!.y + tab!.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(editor!.x + editor!.width - 25, editor!.y + editor!.height / 2, { steps: 20 });
-  await page.mouse.up();
+  await dragTab(page, tab, editor!.x + editor!.width - 25, editor!.y + editor!.height / 2);
   const explorer = await page.locator('.explorer').boundingBox();
   const welcome = await page.locator('.welcome').boundingBox();
   expect(explorer!.x).toBeGreaterThan(welcome!.x);
@@ -77,6 +129,111 @@ test('moves the explorer to the right and restores the saved layout on reload', 
   const restoredExplorer = await page.locator('.explorer').boundingBox();
   const restoredEditor = await page.locator('.welcome').boundingBox();
   expect(restoredExplorer!.x).toBeGreaterThan(restoredEditor!.x);
+});
+
+test('reclaims the space of a split when its last file is closed while maximized', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'main.py', exact: true }).click();
+  const file = page.getByRole('tab', { name: 'main.py', exact: true });
+  const groups = page.locator('.flexlayout__tabset');
+  await expect(page.locator('.cm-editor')).toBeVisible();
+  const editor = (await page.locator('.cm-editor').boundingBox())!;
+  await dragTab(page, file, editor.x + editor.width / 2, editor.y + 25);
+  await expect(groups).toHaveCount(4);
+
+  const split = groups.filter({ has: file });
+  await split.getByRole('button', { name: 'Maximize tabset', exact: true }).click();
+  await expect(split.getByRole('button', { name: 'Restore tabset', exact: true })).toBeVisible();
+  await file.locator('.flexlayout__tab_button_trailing').click();
+  await expect(groups).toHaveCount(3);
+  await expect(page.getByRole('heading', { name: 'Room to create.' })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Problems' })).toBeVisible();
+});
+
+test('recovers panels from a maximized Welcome using the activity bar or View', async ({ page }) => {
+  await page.goto('/');
+  const editor = page.locator('.flexlayout__tabset').filter({ has: page.getByRole('tab', { name: 'Welcome', exact: true }) });
+  const maximize = editor.getByRole('button', { name: 'Maximize tabset', exact: true });
+  await maximize.click();
+  await expect(page.locator('.explorer')).toBeHidden();
+  await page.getByRole('button', { name: 'Explorer', exact: true }).click();
+  await expect(page.locator('.explorer')).toBeVisible();
+  await maximize.click();
+  await viewAction(page, 'Restore workspace');
+  await expect(page.locator('.explorer')).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Problems' })).toBeVisible();
+  await expect(maximize).toBeVisible();
+});
+
+test('restores hidden panels after a reload without losing the open editor', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'main.py', exact: true }).click();
+  for (const panel of ['Explorer', 'Search', 'Git', 'Problems']) await viewAction(page, `Hide ${panel}`);
+  await expect(page.locator('.flexlayout__tabset')).toHaveCount(1);
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('leve.session.v1') || '{}').layout?.borders?.[0]?.children?.length)).toBe(4);
+  await page.reload();
+  await expect(page.locator('.flexlayout__tabset')).toHaveCount(1);
+  await expect(page.locator('.cm-content')).toContainText('from services.greeting import greet');
+  await viewAction(page, 'Restore workspace');
+  await expect(page.locator('.flexlayout__tabset')).toHaveCount(3);
+  await expect(page.locator('.explorer')).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Problems' })).toBeVisible();
+  await expect(page.locator('.cm-content')).toContainText('from services.greeting import greet');
+});
+
+test('removes the original editor area when its last tab is moved and opens files beside Welcome', async ({ page }) => {
+  await page.goto('/');
+  const welcome = page.getByRole('tab', { name: 'Welcome', exact: true });
+  const explorer = (await page.locator('.explorer').boundingBox())!;
+  await dragTab(page, welcome, explorer.x + explorer.width / 2, explorer.y + explorer.height / 2);
+  await expect(page.locator('.flexlayout__tabset')).toHaveCount(2);
+  await expect(welcome).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('tab', { name: 'Explorer', exact: true }).click();
+  await page.getByRole('button', { name: 'main.py', exact: true }).click();
+  await expect(page.locator('.cm-content')).toContainText('from services.greeting import greet');
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('leve.session.v1') || '{}').files?.length)).toBe(1);
+  await page.reload();
+  await expect(page.locator('.cm-content')).toContainText('from services.greeting import greet');
+  await expect(page.locator('.flexlayout__tabset')).toHaveCount(2);
+});
+
+test('cleans up an empty split from a saved layout made before automatic removal', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('leve.layout.v1', JSON.stringify({
+      global: { tabSetEnableClose: false },
+      layout: { type: 'row', children: [
+        { type: 'tabset', children: [
+          { type: 'tab', id: 'explorer', component: 'explorer', name: 'Explorer', enableClose: false },
+          { type: 'tab', id: 'search', component: 'search', name: 'Search', enableClose: false },
+        ] },
+        { type: 'tabset', id: 'documents', children: [
+          { type: 'tab', id: 'welcome', component: 'welcome', name: 'Welcome', enableClose: false },
+        ] },
+        { type: 'tabset', id: 'old-split', enableDeleteWhenEmpty: false, children: [] },
+      ] },
+    }));
+  });
+  await page.goto('/');
+  await expect(page.getByRole('tab', { name: 'Git', exact: true })).toBeVisible();
+  await expect(page.locator('.flexlayout__tabset')).toHaveCount(2);
+});
+
+test('removes the original terminal area when emptied and keeps the terminal picker available', async ({ page }) => {
+  await page.goto('/');
+  const plus = page.getByRole('button', { name: 'New terminal', exact: true }).filter({ has: page.locator('svg.lucide-plus') });
+  const terminal = page.getByRole('tab', { name: 'PowerShell', exact: true });
+  const problems = page.getByRole('tab', { name: 'Problems' });
+  await plus.click();
+  await page.getByRole('menuitem', { name: 'PowerShell', exact: true }).click();
+  const editor = (await page.locator('.welcome').boundingBox())!;
+  await dragTab(page, problems, editor.x + editor.width / 2, editor.y + 25);
+  const groups = page.locator('.flexlayout__tabset');
+  await expect(groups).toHaveCount(4);
+  await terminal.locator('.flexlayout__tab_button_trailing').click();
+  await expect(groups).toHaveCount(3);
+  await groups.filter({ has: problems }).locator(plus).click();
+  await page.getByRole('menuitem', { name: 'PowerShell', exact: true }).click();
+  await expect(groups.filter({ has: problems }).locator(terminal)).toBeVisible();
 });
 
 test('updates built-in labels in layouts saved by older versions', async ({ page }) => {
@@ -191,6 +348,11 @@ test('desktop shell selection starts immediately and keeps other terminal sessio
   await plus.click();
   await page.getByRole('menuitem', { name: 'Git Bash', exact: true }).click();
   await expect(page.getByRole('tabpanel', { name: 'Git Bash', exact: true }).locator('.xterm')).toBeVisible();
+  await viewAction(page, 'Hide Terminal');
+  await expect(page.getByRole('tab', { name: /CMD|Git Bash/ })).toHaveCount(0);
+  await viewAction(page, 'Show Terminal');
+  await expect(page.getByRole('tab', { name: 'Git Bash', exact: true })).toBeVisible();
+  await expect(page.getByRole('tabpanel', { name: 'CMD', exact: true }).locator('.xterm')).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as unknown as { shellCalls: { starts: string[] } }).shellCalls.starts)).toEqual(['cmd', 'git-bash']);
   expect(await page.evaluate(() => (window as unknown as { shellCalls: { closes: string[] } }).shellCalls.closes)).toEqual([]);
   await page.evaluate(() => { (window as unknown as { shellCalls: { failures: { next: boolean } } }).shellCalls.failures.next = true; });

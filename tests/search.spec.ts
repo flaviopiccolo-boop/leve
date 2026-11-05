@@ -4,6 +4,7 @@ test.afterEach(async ({ page }) => { await page.close({ runBeforeUnload: false }
 
 test('finds literal text across files and opens the match at the correct position', async ({ page }) => {
   await page.goto('/');
+  await expect(page.locator('.statusbar')).toContainText('Recovery saved');
   await page.keyboard.press('Control+Shift+f');
   await page.getByRole('textbox', { name: 'Search project contents' }).fill('greet("world")');
   const match = page.locator('.content-result');
@@ -19,6 +20,7 @@ test('finds literal text across files and opens the match at the correct positio
 
 test('supports case-sensitive content searches and handles zero results', async ({ page }) => {
   await page.goto('/');
+  await expect(page.locator('.statusbar')).toContainText('Recovery saved');
   await page.keyboard.press('Control+Shift+f');
   await page.getByRole('textbox', { name: 'Search project contents' }).fill('GREET');
   await expect(page.locator('.content-result')).toHaveCount(4);

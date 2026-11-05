@@ -236,3 +236,43 @@ test('desktop file operations send the selected project and synchronize open tab
     { command: 'delete_entry', args: { path: 'two.py', expectedRoot: 'C:\\native-project' } },
   ]);
 });
+
+test('the desktop explorer picks up external changes inside a folder that stays expanded', async ({ page }) => {
+  await page.addInitScript(() => {
+    const directories: Record<string, Array<{ name: string; path: string; directory: boolean }>> = {
+      '': [{ name: 'work', path: 'work', directory: true }],
+      work: [{ name: 'old.py', path: 'work/old.py', directory: false }],
+    };
+    let callback = 0;
+    Object.assign(window, { externalDirectories: directories, isTauri: true, __TAURI_INTERNALS__: {
+      metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+      transformCallback: () => ++callback, unregisterCallback: () => {},
+      invoke: async (command: string, args: { path?: string } = {}) => {
+        if (command === 'session_load') return null;
+        if (command === 'list_shells') return [];
+        if (command === 'plugin:event|listen') return 1;
+        if (command === 'plugin:dialog|open') return 'C:\\native-project';
+        if (command === 'set_workspace') return args.path;
+        if (command === 'list_directory') return directories[args.path ?? ''] ?? [];
+      },
+    } });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'File', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Open folder…', exact: true }).click();
+  const folder = page.getByRole('button', { name: 'work', exact: true });
+  await folder.click();
+  await expect(page.getByRole('button', { name: 'old.py', exact: true })).toBeVisible();
+
+  // Update the native directory listing without using Leve's file actions or refresh button.
+  await page.evaluate(() => {
+    (window as unknown as { externalDirectories: Record<string, unknown[]> }).externalDirectories.work = [
+      { name: 'generated', path: 'work/generated', directory: true },
+      { name: 'new.py', path: 'work/new.py', directory: false },
+    ];
+  });
+  await expect(page.getByRole('button', { name: 'generated', exact: true })).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByRole('button', { name: 'new.py', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'old.py', exact: true })).toHaveCount(0);
+  await expect(folder).toHaveAttribute('aria-expanded', 'true');
+});
