@@ -18,7 +18,7 @@ Leve is a Windows code editor with a dockable workspace, integrated terminals, a
 - **Get language feedback.** Enable autocomplete, diagnostics, and go to definition for Python, JavaScript, and TypeScript. ESLint support uses your project's configuration.
 - **Resume your session.** Leve restores the last project, open files, unsaved edits, and panel layout.
 
-[Language setup](#language-support) · [Windows benchmark](#windows-benchmark) · [Project roadmap](TODO.md)
+[Language setup](#language-support) · [Windows benchmark](#windows-benchmark) · [Project roadmap](TODO.md) · [Contribute](CONTRIBUTING.md) · [MIT license](LICENSE)
 
 ## Try the browser preview
 
