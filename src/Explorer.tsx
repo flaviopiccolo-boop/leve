@@ -4,6 +4,11 @@ import { fileName, listFiles, native, type FileEntry, type FileOperation } from 
 import { gitStatuses, type GitDecorations } from './Git';
 
 type StartOperation = (operation: FileOperation, returnFocus?: HTMLElement | null) => void;
+const TYPEAHEAD_TIMEOUT = 750;
+
+function searchName(value: string) {
+  return value.normalize('NFD').replace(/\p{Mark}/gu, '').toLowerCase();
+}
 
 function Tree({ path = '', depth = 0, refresh, reveal, decorations, onOpen, onMenu, onOperation }: {
   path?: string; depth?: number; refresh: number; reveal: string; decorations: GitDecorations;
@@ -97,7 +102,39 @@ export default function Explorer({ root, blocked, refresh, reveal, decorations, 
   const [menu, setMenu] = useState<{ entry: FileEntry | null; left: number; top: number } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuOrigin = useRef<HTMLElement | null>(null);
+  const typeahead = useRef<{ prefix: string; time: number } | null>(null);
   const enabled = !blocked && (!native || !!root);
+  const findTreeEntry = (event: KeyboardEvent<HTMLDivElement>) => {
+    const target = event.target;
+    if (!(target instanceof HTMLButtonElement) || !target.classList.contains('tree-item')) return;
+    if (event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) return;
+    if (event.defaultPrevented || Array.from(event.key).length !== 1) {
+      typeahead.current = null;
+      return;
+    }
+
+    const now = performance.now();
+    const previous = typeahead.current;
+    const prefix = previous && now - previous.time < TYPEAHEAD_TIMEOUT ? previous.prefix : '';
+    if (event.key === ' ' && !prefix) return;
+    const key = searchName(event.key);
+    if (!key) return;
+    event.preventDefault();
+
+    const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('.tree-item'));
+    const index = rows.indexOf(target);
+    const matchFrom = (start: number, query: string) => rows.slice(start).concat(rows.slice(0, start))
+      .find(row => searchName(row.querySelector('.tree-name')?.textContent ?? '').startsWith(query));
+    let query = prefix + key;
+    let match = prefix ? matchFrom(index, query) : undefined;
+    // Try a longer prefix first so repeated letters can match names such as ffmpeg.
+    if (!prefix || (!match && prefix === key)) {
+      query = key;
+      match = matchFrom(index + 1, query);
+    }
+    typeahead.current = { prefix: query, time: now };
+    match?.focus();
+  };
   const action: StartOperation = (operation, returnFocus) => {
     setMenu(null);
     onOperation(operation, returnFocus);
@@ -132,7 +169,12 @@ export default function Explorer({ root, blocked, refresh, reveal, decorations, 
       <button className="icon-button" title="Open folder" onClick={onFolder}><FolderOpen size={15} /></button>
     </div></div>
     <div className="project-heading"><ChevronDown size={13} /><span>{root ? fileName(root) : 'example-project'}</span>{!root && <span className="demo-badge">DEMO</span>}</div>
-    {blocked ? <p className="panel-description">Project unavailable. Recovered files remain open.</p> : <div className="explorer-tree"><Tree key={root ?? 'demo'} refresh={refresh} reveal={reveal} decorations={decorations} onOpen={onOpen} onMenu={openMenu} onOperation={enabled ? action : undefined} /></div>}
+    {blocked ? <p className="panel-description">Project unavailable. Recovered files remain open.</p> : <div className="explorer-tree"
+      onKeyDown={findTreeEntry}
+      onPointerDown={() => { typeahead.current = null; }}
+      onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) typeahead.current = null; }}>
+      <Tree key={root ?? 'demo'} refresh={refresh} reveal={reveal} decorations={decorations} onOpen={onOpen} onMenu={openMenu} onOperation={enabled ? action : undefined} />
+    </div>}
     <div className="explorer-root-space" onContextMenu={event => openMenu(null, event.clientX, event.clientY)} />
     {menu && <div key={parent} ref={menuRef} className="terminal-menu file-menu" role="menu" aria-label={entry ? `Actions for ${entry.name}` : 'Project root actions'} style={{ left: menu.left, top: menu.top }} onKeyDown={event => {
       if (event.key === 'Escape') {

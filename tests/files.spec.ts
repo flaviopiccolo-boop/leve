@@ -14,6 +14,42 @@ async function create(page: Page, kind: 'file' | 'folder', name: string) {
 
 test.afterEach(async ({ page }) => { await page.close({ runBeforeUnload: false }); });
 
+test('typing in the explorer jumps to visible folders and files by name', async ({ page }) => {
+  await page.goto('/');
+  await create(page, 'folder', 'files');
+  await create(page, 'folder', 'fixtures');
+  await create(page, 'folder', 'frontend');
+  const tree = page.locator('.explorer-tree');
+  const row = (name: string) => tree.getByRole('button', { name, exact: true });
+  await row('src').focus();
+  await page.keyboard.press('Shift+F');
+  await expect(row('files')).toBeFocused();
+  await page.keyboard.press('f');
+  await expect(row('fixtures')).toBeFocused();
+  await page.keyboard.press('f');
+  await expect(row('frontend')).toBeFocused();
+  await page.keyboard.press('f');
+  await expect(row('files')).toBeFocused();
+
+  await page.keyboard.press('Escape');
+  await page.keyboard.type('FRONT');
+  await expect(row('frontend')).toBeFocused();
+  await expect(row('frontend')).toHaveAttribute('aria-expanded', 'true');
+  await page.keyboard.press('Enter');
+  await expect(row('frontend')).toHaveAttribute('aria-expanded', 'false');
+
+  await create(page, 'folder', 'ffmpeg');
+  await row('src').focus();
+  await page.keyboard.type('ffm');
+  await expect(row('ffmpeg')).toBeFocused();
+  await page.keyboard.press('Escape');
+  await page.keyboard.type('main.py');
+  await expect(row('main.py')).toBeFocused();
+  await expect(page.getByRole('tab', { name: 'main.py', exact: true })).toHaveCount(0);
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('tab', { name: 'main.py', exact: true })).toBeVisible();
+});
+
 test('explorer keyboard shortcuts confirm deletion, rename entries and create in a folder', async ({ page }) => {
   await page.goto('/');
   const file = page.getByRole('button', { name: 'main.py', exact: true });
