@@ -6,6 +6,7 @@ import { useTheme } from './theme';
 import { loadShells, previewShells, type ShellProfile } from './shells';
 import { loadSession, restoreFiles, saveSession, type Session } from './session';
 import { loadProjects, rememberProject, sameProject } from './projects';
+import { version } from '../package.json';
 import Explorer, { FileDialog } from './Explorer';
 import ContentSearch from './ContentSearch';
 import { gitDecorations, GitDiff, GitPanel, useGitStatus, type GitChange } from './Git';
@@ -546,7 +547,7 @@ export default function App() {
         <button className="button secondary" onClick={() => void openFile('src/main.py')} disabled={!!root}><FileCode2 size={16} /> Explore demo</button></div>
         <div className="welcome-hints"><div><span>Find file</span><kbd>Ctrl P</kbd></div><div><span>Save file</span><kbd>Ctrl S</kbd></div><div><span>New terminal</span><kbd>Ctrl `</kbd></div></div>
         <div className="layout-tip"><Blocks size={16} /><span>Drag tabs to rearrange your workspace.</span></div>
-      </div><span className="welcome-version">LEVE EDITOR · EARLY PREVIEW</span></div>;
+      </div><span className="welcome-version">{native ? `LEVE EDITOR · V${version}` : 'LEVE EDITOR · WEB PREVIEW'}</span></div>;
     }
   };
 
@@ -562,7 +563,7 @@ export default function App() {
 
   return <div className="app-shell" onContextMenuCapture={event => event.preventDefault()}>
     <header className={native ? 'titlebar desktop-titlebar' : 'titlebar'} data-tauri-drag-region={native ? '' : undefined}>
-      <div className="app-name"><Code2 size={18} /><strong>leve</strong><span className="preview-tag">preview</span></div>
+      <div className="app-name"><Code2 size={18} /><strong>leve</strong><span className="preview-tag">{native ? `v${version}` : 'preview'}</span></div>
       <button ref={projectPicker} className="project-picker" data-tauri-drag-region="false" title={root || 'Switch project'} aria-haspopup="menu" aria-expanded={projectMenu} aria-controls={projectMenu ? 'project-menu' : undefined} disabled={switchingProject} onClick={() => setProjectMenu(value => !value)}><Folder size={13} /><span>{root ? fileName(root) : 'No folder open'}</span><ChevronDown size={12} /></button>
       <div className="titlebar-actions" data-tauri-drag-region="false">
         <button className="icon-button" title="Layout and shortcuts" onClick={() => setSettings(true)}><Settings2 size={16} /></button>

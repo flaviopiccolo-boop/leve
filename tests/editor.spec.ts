@@ -235,6 +235,8 @@ test('the desktop title bar controls the window and closes through session recov
   await header.getByRole('button', { name: 'Maximize window' }).click();
   await header.getByRole('button', { name: 'Restore window' }).click();
   await expect(header.getByRole('button', { name: 'Maximize window' })).toBeVisible();
+  // Let the initial checkpoint finish before measuring the close sequence.
+  await expect(page.getByText('Recovery saved', { exact: true })).toBeVisible();
   await page.evaluate(() => ((window as any).windowCalls as string[]).splice(0));
   await header.getByRole('button', { name: 'Close window' }).click();
   await expect.poll(() => page.evaluate(() => (window as any).windowCalls)).toEqual([

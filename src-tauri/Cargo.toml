@@ -1,6 +1,6 @@
 [package]
 name = "leve-editor"
-version = "0.1.0"
+version = "1.0.0"
 description = "A local editor with room to create"
 edition = "2021"
 

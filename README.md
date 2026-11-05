@@ -1,10 +1,26 @@
 # Leve Editor
 
-An early Windows desktop code editor with a file explorer on the left, an editor in the center, and terminals at the bottom. Panels can be rearranged by dragging their tabs.
+Leve is a Windows code editor with a dockable workspace, integrated terminals, and session recovery. Open a local project, arrange your panels, and pick up where you left off.
 
-“Leve” is the project's working name. Memory usage and performance have not yet been benchmarked against other editors.
+**[Download Leve 1.0.0 for Windows x64](https://github.com/flaviopiccolo-boop/leve/releases/download/v1.0.0/Leve_1.0.0_x64-setup.exe)** · [Release notes](https://github.com/flaviopiccolo-boop/leve/releases/tag/v1.0.0)
 
-## Try the interface
+![Leve 1.0 on Windows with the project explorer and a Python file open](docs/images/leve-windows.png)
+
+## Get started
+
+1. Download and run the Windows x64 installer. The installer is unsigned and uses Microsoft Edge WebView2.
+2. Launch Leve and select **Open folder** to open a project.
+3. Press **Ctrl+P** to find a file, **Ctrl+Shift+F** to search across the project, and **Ctrl+S** to save your changes.
+
+- **Make the workspace yours.** Drag tabs to dock or split panels, and switch between light and dark themes under **Settings → Appearance**.
+- **Work with local projects.** Browse, create, rename, and delete files in Explorer. Use the title bar to switch between recent folders.
+- **Use your tools alongside your code.** Open PowerShell, CMD, Git Bash, or PowerShell 7. Review staged, unstaged, and untracked files with inline Git diffs.
+- **Get language feedback.** Enable autocomplete, diagnostics, and go to definition for Python, JavaScript, and TypeScript. ESLint support uses your project's configuration.
+- **Resume your session.** Leve restores the last project, open files, unsaved edits, and panel layout.
+
+[Language setup](#language-support) · [Windows benchmark](#windows-benchmark) · [Project roadmap](TODO.md)
+
+## Try the browser preview
 
 Requires Node.js 22.12+ or 24 and npm.
 
@@ -15,7 +31,7 @@ npm run dev
 
 Open http://127.0.0.1:1420. The web preview uses an in-memory demo project. You can edit files, save changes within the session, find files, dock panels, and resize areas. It does not access real folders or run shell commands. Reloading resets demo content while preserving the panel layout.
 
-## Run the Windows app
+## Run from source on Windows
 
 In addition to Node.js, install the [official Tauri prerequisites](https://v2.tauri.app/start/prerequisites/):
 
@@ -27,7 +43,9 @@ In addition to Node.js, install the [official Tauri prerequisites](https://v2.ta
 npm run desktop
 ```
 
-Select **Open folder** to choose a real project. The explorer loads subfolders as you expand them. Open a file and press **Ctrl+S** to save it. The app always opens without terminal tabs, including when loading layouts from older versions. Click **+** and choose a shell to create and immediately start a focused session. There is no separate Start button. Sessions use the project folder when one is open, or your home folder otherwise. Existing terminal sessions stay open. Press Ctrl and the backtick key to create a PowerShell session directly.
+## Integrated terminals
+
+Click **+** and choose a shell to start a focused terminal session. Sessions use the project folder when one is open, or your home folder otherwise. Press Ctrl and the backtick key to start PowerShell directly. Leve opens with an empty terminal panel.
 
 The terminal uses xterm.js in the frontend and portable-pty/ConPTY in Rust. Supported profiles are **PowerShell**, **CMD**, **Git Bash**, and **PowerShell 7**. The desktop app detects installed shells from PATH and common installation locations; unavailable profiles are disabled. Git Bash requires Git for Windows, and PowerShell 7 requires its separate installation. Reopen the picker to refresh detection. The web preview lets you try the picker and tabs without running commands or determining actual availability.
 
@@ -37,30 +55,11 @@ Closing a terminal tab, resetting the layout, changing projects, or exiting the 
 
 Native Windows file drag-and-drop is disabled in the WebView to allow HTML panel dragging. Projects are opened through the folder picker.
 
-## Implemented features
-
-- React and TypeScript frontend with Tauri 2 and Rust.
-- Dockable panels using FlexLayout (MIT), adjustable splitters, tab grouping, and split views.
-- Saved panel layouts and a reset-to-default action. Built-in panel titles are updated when loading layouts saved by earlier versions.
-- Lazy file tree, manual refresh, and file name/path search. The index is limited to 5,000 files and 15 levels, excluding common dependency and build folders.
-- CodeMirror 6 editing, undo history, in-file search, and language support loaded on demand.
-- File tabs, unsaved-change indicators, discard confirmation, and window-close protection.
-- Reading and saving existing files within the selected workspace.
-- External-change checks before saving, with a temporary file written in the same directory before replacing the original.
-- PowerShell, CMD, Git Bash, and PowerShell 7 profiles with installation detection, byte-stream output, keyboard input, resizing, and cleanup.
-- English interface, messages, documentation, and demo content.
-- Dark and light themes under **Settings → Appearance**, applied immediately to panels, the editor, and open terminals. The preference is saved locally; switching themes preserves editor history and terminal sessions.
-- Last-project and open-file recovery, including the active file, panel arrangement, and unsaved buffers. Terminal tabs remain empty at startup.
-- Project switcher in the title bar with persistent recent-folder history, most recently opened first. Each entry shows its full path to distinguish folders with the same name. **Open another folder…** opens the folder dialog. Switching projects checks for unsaved changes; unavailable folders keep the current project open.
-- Explorer file and folder creation, renaming, and confirmed permanent deletion, with open-buffer updates and workspace path checks.
-- Project-wide literal content search, optional case-sensitive matching, cancellation, and clickable results with editor selection.
-- Read-only Git panel with staged, working tree, and untracked changes and inline diffs.
-
 ## File management and project search
 
 Use **New file** or **New folder** in the explorer header to create an entry at the project root. Right-click an entry, or use its **…** button, to rename or delete it. Folder menus also create files and subfolders inside that folder. New files open immediately; new folders and their parents are revealed in the tree.
 
-With a file or folder focused in the Explorer, type the start of a name to jump to a visible entry. A repeated letter cycles through matches if it cannot extend the prefix. Press **Enter** to open a file or toggle a folder. Use **Ctrl+P** to find files inside collapsed folders.
+With a file or folder focused in the Explorer, type the start of a name to jump to a visible entry. A repeated letter cycles through matches if it cannot extend the prefix. Press **Enter** to open a file or toggle a folder. Use **Ctrl+P** to find files inside collapsed folders. The file index scans up to 5,000 files and 15 directory levels and skips common dependency and build folders.
 
 Renaming a file or folder updates affected open tabs and keeps unsaved edits and their disk baselines. The editor is recreated for a renamed path, so its undo history resets. Deleting an entry requires explicit confirmation, warns about affected unsaved buffers, permanently removes the disk entry, and closes affected tabs. Deletion does not use the Recycle Bin. Duplicate names never overwrite existing entries. Mutations reject paths outside the project, reserved Windows names, links/junctions, and changes to the project root. Folder deletion preflights up to 100,000 entries and 100 levels; larger or linked trees must be handled in Windows Explorer. Filesystem operations are not transactional against concurrent external filesystem changes; a failed recursive deletion may have removed some entries, so buffers are retained and the tree refreshes on error.
 
@@ -151,9 +150,42 @@ The output is `src-tauri/target/debug/leve-editor.exe`. This build is not optimi
 npm run desktop:build
 ```
 
-The configuration targets an NSIS installer. Installer generation and behavior still require native validation. Portable packaging, signing, and updates are future work.
+On Windows x64, this produces `src-tauri/target/release/bundle/nsis/Leve_1.0.0_x64-setup.exe`. The first build downloads the NSIS tools. The installer runs per user and can download the WebView2 bootstrapper when the runtime is missing.
+
+The unsigned 1.0.0 package was validated in silent mode on a machine with WebView2 already present. Installation in a custom directory registered Leve in Windows. The installed app opened a project, edited and saved a real file, and restored the project and file on restart. Uninstallation removed the binaries and the Windows uninstall registration.
+
+## Windows benchmark
+
+Close all running Leve windows, then point the benchmark at the installed or standalone release executable.
+
+```powershell
+node scripts/benchmark-windows.mjs 'C:\path\to\leve-editor.exe' 5
+```
+
+The script creates synthetic workspaces of 100 and 4,000 files and uses a separate WebView2 profile. It temporarily moves any existing recovery directory to a sibling backup, prints its path, and restores it on normal completion or a handled failure. If the benchmark is forcibly interrupted, close the benchmark instance and restore that backup before reopening Leve. Raw samples are written to `artifacts/windows-benchmark-*/results.json`.
+
+Startup runs from process launch until Playwright observes the local status bar, including the WebView2 debugger connection. It uses a warmed WebView2 profile and an empty Leve session. Project timings use the recent-project menu. Search timings include the 250 ms debounce and end when the result appears or the scan completes. Both workspaces include the same 60,000-line plain text file for the open, edit, and save measurements. Project content search skips that file because it exceeds the 1 MiB per-file search limit. The benchmark runs without language servers or terminals.
+
+Memory samples sum Leve and its WebView2 child processes after two seconds idle and again after opening the large file. Private bytes measure committed private memory. The summed working set measures resident pages and can count a shared page more than once.
+
+The 1.0.0 installed build was measured on Windows build 26300 with an Intel Core i7-10700, 31.7 GiB RAM, and WebView2 156.0.4314.58. Across ten empty-session launches, median startup was **1,070 ms** (919–1,222 ms). Median idle memory was **163 MiB private** and **386 MiB summed working set**.
+
+| Operation or memory sample | 100 files | 4,000 files |
+| --- | ---: | ---: |
+| Open project and render root entries | 133 ms | 174 ms |
+| Find a file by name on first search | 329 ms | 1,349 ms |
+| Search project contents | 381 ms | 2,426 ms |
+| Open a 2.92 MiB text file | 888 ms | 1,318 ms |
+| Insert text at the start of the file | 39 ms | 67 ms |
+| Save and verify the edit on disk | 814 ms | 866 ms |
+| Private memory with the file open | 223 MiB | 253 MiB |
+| Summed working set with the file open | 459 MiB | 486 MiB |
+
+Each column shows the median of five runs. Content search found the expected match in every run and completed without reaching the search budget. It had the largest increase between the two project sizes.
 
 ## Project structure
+
+Leve uses Tauri 2 and Rust for native operations, React and TypeScript for the interface, CodeMirror 6 for editing, and FlexLayout for docking.
 
 - `src/App.tsx`: application shell, docking, navigation, and file state.
 - `src/Editor.tsx`: CodeMirror integration and language loading.
