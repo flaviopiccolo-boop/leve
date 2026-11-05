@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'react';
-import { Actions, BorderNode, DockLocation, Layout, Model, TabNode, TabSetNode, type Action, type IJsonModel } from 'flexlayout-react';
-import { Blocks, ChevronDown, Code2, FileCode2, Files, Folder, FolderOpen, GitBranch, Keyboard, LayoutTemplate, Plus, Search, Settings2, TerminalSquare, X } from 'lucide-react';
+import { Actions, BorderNode, DockLocation, Layout, Model, PopupMenu, TabNode, TabSetNode, type Action, type IJsonModel } from 'flexlayout-react';
+import { Blocks, Check, ChevronDown, Code2, FileCode2, Files, Folder, FolderOpen, GitBranch, Keyboard, LayoutTemplate, Plus, Search, Settings2, TerminalSquare, X } from 'lucide-react';
 import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import { useTheme } from './theme';
 import { loadShells, previewShells, type ShellProfile } from './shells';
@@ -12,6 +12,7 @@ import ContentSearch from './ContentSearch';
 import { gitDecorations, GitDiff, GitPanel, useGitStatus, type GitChange } from './Git';
 import WindowControls from './WindowControls';
 import Problems from './Problems';
+import { dockPanel, documentTabset, getTab, hiddenPanelsBorder, hidePanels, isPanelShown, panelIds, panelTabs, restorePanelSizes, revealTab, tabsetOf, terminalTabs, terminalTabset, type PanelId } from './dockPanels';
 import { LanguageWorkspace, languageFeature, languageFeatures, languageId, type Definition, type LanguageFeature, type LanguageOptions, type Problem } from './language';
 import type { EditorJump } from './Editor';
 import { activateWorkspace, fileName, indexFiles, languageName, mutateEntry, native, pickWorkspace, readFile, withinEntry, writeFile, type FileEntry, type FileOperation, type OpenFile } from './workspace';
@@ -34,8 +35,6 @@ function languageProjects(): LanguagePreference[] {
     });
   } catch { return []; }
 }
-const problemsTab = { type: 'tab', id: 'problems', name: 'Problems', component: 'problems', enableClose: false };
-const gitTab = { type: 'tab', id: 'git', name: 'Git', component: 'git', enableClose: false };
 const Editor = lazy(() => import('./Editor'));
 const Terminal = lazy(() => import('./Terminal'));
 function fileTab(model: Model, path: string): TabNode | undefined {
@@ -54,24 +53,23 @@ function selectedFile(model: Model, previous: string): string {
   const parent = previousTab?.getParent();
   if ((parent instanceof TabSetNode || parent instanceof BorderNode) && parent.getSelectedNode() === previousTab) return previous;
 
-  const documents = model.getNodeById('documents');
-  const document = documents instanceof TabSetNode ? documents.getSelectedNode() : undefined;
+  const document = documentTabset(model)?.getSelectedNode();
   return document?.getComponent() === 'file' ? document.getConfig().path : '';
 }
+// FlexLayout only removes empty tabsets that are closeable. Hide the group close button separately.
+const tabsetCleanup = { tabSetEnableClose: true, tabSetEnableCloseButton: false, tabSetEnableDeleteWhenEmpty: true };
 const initialLayout = (): IJsonModel => ({
-  global: { tabEnableRename: false, tabSetEnableClose: false, tabSetMinWidth: 170, tabSetMinHeight: 100, tabSetEnableMaximize: true },
-  borders: [],
+  global: { ...tabsetCleanup, tabEnableRename: false, tabSetMinWidth: 170, tabSetMinHeight: 100, tabSetEnableMaximize: true },
+  borders: [hiddenPanelsBorder()],
   layout: { type: 'row', weight: 100, children: [
-    { type: 'tabset', id: 'navigation', weight: 20, enableDeleteWhenEmpty: false, children: [
-      { type: 'tab', id: 'explorer', name: 'Explorer', component: 'explorer', enableClose: false },
-      { type: 'tab', id: 'search', name: 'Search', component: 'search', enableClose: false },
-      gitTab,
+    { type: 'tabset', id: 'navigation', weight: 20, children: [
+      panelTabs.explorer, panelTabs.search, panelTabs.git,
     ] },
     { type: 'row', weight: 80, children: [
-      { type: 'tabset', id: 'documents', weight: 73, enableDeleteWhenEmpty: false, children: [
+      { type: 'tabset', id: 'documents', weight: 73, children: [
         { type: 'tab', id: 'welcome', name: 'Welcome', component: 'welcome', enableClose: false },
       ] },
-      { type: 'tabset', id: 'terminals', weight: 27, enableDeleteWhenEmpty: false, children: [problemsTab] },
+      { type: 'tabset', id: 'terminals', weight: 27, children: [panelTabs.problems] },
     ] },
   ] },
 });
@@ -81,23 +79,28 @@ function loadLayout(savedLayout?: IJsonModel, restoredFiles?: Set<string>) {
     const raw = savedLayout ? JSON.stringify(savedLayout) : localStorage.getItem(LAYOUT_KEY);
     if (raw) {
       const json = JSON.parse(raw) as IJsonModel;
+      json.global = { ...json.global, ...tabsetCleanup };
       // Restore validated file buffers and leave terminal sessions and diff views closed.
       const panelNames: Record<string, string> = { explorer: 'Explorer', search: 'Search', welcome: 'Welcome' };
-      const clean = (node: { children?: any[]; component?: string; selected?: number; name?: string; config?: { path?: string } }) => {
+      const clean = (node: { type?: string; children?: any[]; component?: string; selected?: number; name?: string; enableDeleteWhenEmpty?: boolean }) => {
+        if (node.type === 'tabset') delete node.enableDeleteWhenEmpty;
         if (node.component && panelNames[node.component]) node.name = panelNames[node.component];
         if (node.children) node.children = node.children.filter(n => n.component !== 'terminal' && n.component !== 'git-diff' && (n.component !== 'file' || restoredFiles?.has(n.config?.path)));
         if (node.selected !== undefined) node.selected = 0;
         node.children?.forEach(clean);
       };
       clean(json.layout);
+      json.borders ??= [];
+      if (!json.borders.some(border => border.location === 'left')) json.borders.push(hiddenPanelsBorder());
+      json.borders.forEach(clean);
       const model = Model.fromJson(json);
-      if (model.getNodeById('explorer') && model.getNodeById('search') && model.getNodeById('documents')) {
+      if (model.getNodeById('explorer') && model.getNodeById('search') && documentTabset(model)) {
         if (!model.getNodeById('problems') && model.getNodeById('terminals')) {
-          model.doAction(Actions.addNode(problemsTab, 'terminals', DockLocation.CENTER, 0));
+          model.doAction(Actions.addNode(panelTabs.problems, 'terminals', DockLocation.CENTER, 0));
         }
-        const navigation = model.getNodeById('explorer')?.getParent();
+        const navigation = tabsetOf(getTab(model, 'explorer')) ?? tabsetOf(getTab(model, 'search'));
         if (!model.getNodeById('git') && navigation) {
-          model.doAction(Actions.addNode(gitTab, navigation.getId(), DockLocation.CENTER, -1, false));
+          model.doAction(Actions.addNode(panelTabs.git, navigation.getId(), DockLocation.CENTER, -1, false));
         }
         return model;
       }
@@ -126,10 +129,13 @@ export default function App() {
   const [settings, setSettings] = useState(false);
   const [projects, setProjects] = useState(loadProjects);
   const [projectMenu, setProjectMenu] = useState(false);
+  const [titleMenu, setTitleMenu] = useState<{ name: 'File' | 'View'; origin: HTMLButtonElement } | null>(null);
+  const appShell = useRef<HTMLDivElement>(null);
   const [switchingProject, setSwitchingProject] = useState(false);
   const projectPicker = useRef<HTMLButtonElement>(null);
   const [profiles, setProfiles] = useState<ShellProfile[]>(native ? [] : previewShells);
   const [terminalMenu, setTerminalMenu] = useState<{ left: number; top: number } | null>(null);
+  const [tabMenu, setTabMenu] = useState<{ tab: TabNode; anchor: { x: number; y: number } | HTMLElement; origin: HTMLElement } | null>(null);
   const [query, setQuery] = useState('');
   const [matches, setMatches] = useState<FileEntry[]>([]);
   const [searching, setSearching] = useState(false);
@@ -148,7 +154,6 @@ export default function App() {
   const checkpointTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const sessionRef = useRef({ root, files, activeFile, model, sessionReady, recoveryLocked });
   sessionRef.current = { root, files, activeFile, model, sessionReady, recoveryLocked };
-  const allowClose = useRef(false);
   const opening = useRef(new Set<string>());
   const saving = useRef(new Set<string>());
   const generation = useRef(0);
@@ -233,11 +238,12 @@ export default function App() {
         const restored = blocked ? { files: Object.fromEntries(saved.files.map(file => [file.path, file])), warnings: [], recovered: saved.files.filter(file => file.content !== file.saved).length } : await restoreFiles(saved.files);
         const nextModel = loadLayout(saved.layout, new Set(Object.keys(restored.files)));
         // Include buffers whose original docking group no longer exists.
+        const target = documentTabset(nextModel)!;
         for (const file of Object.values(restored.files)) {
-          if (!fileTab(nextModel, file.path)) nextModel.doAction(Actions.addNode({ type: 'tab', id: `file:${file.path}`, name: file.name, component: 'file', config: { path: file.path } }, 'documents', DockLocation.CENTER, -1));
+          if (!fileTab(nextModel, file.path)) nextModel.doAction(Actions.addNode({ type: 'tab', id: `file:${file.path}`, name: file.name, component: 'file', config: { path: file.path } }, target.getId(), DockLocation.CENTER, -1));
         }
         const selected = restored.files[saved.activeFile] ? saved.activeFile : Object.keys(restored.files)[0] || '';
-        if (selected) nextModel.doAction(Actions.selectTab(fileTab(nextModel, selected)!.getId()));
+        if (selected) revealTab(nextModel, fileTab(nextModel, selected)!);
         setRoot(openedRoot); setFiles(restored.files); setModel(nextModel); setActiveFile(selected);
         if (openedRoot && !blocked) remember(openedRoot);
         setRecoveryBlocked(blocked); setRecoveryWarning(restored.warnings.join(' '));
@@ -272,7 +278,7 @@ export default function App() {
     if (recoveryBlocked) { notify('Reopen the project before opening additional files.'); return; }
     const id = `file:${crypto.randomUUID()}`;
     const existing = fileTab(model, path);
-    if (existing) { model.doAction(Actions.selectTab(existing.getId())); setActiveFile(path); return; }
+    if (existing) { revealTab(model, existing); setActiveFile(path); return; }
     if (opening.current.has(path)) return;
     opening.current.add(path);
     const currentGeneration = generation.current;
@@ -280,8 +286,12 @@ export default function App() {
       const content = await readFile(path);
       if (generation.current !== currentGeneration) return;
       setFiles(previous => ({ ...previous, [path]: { path, name: fileName(path), content, saved: content } }));
-      const target = model.getNodeById('documents');
-      if (target) model.doAction(Actions.addNode({ type: 'tab', id, name: fileName(path), component: 'file', config: { path } }, target.getId(), DockLocation.CENTER, -1));
+      const target = documentTabset(model);
+      if (target) {
+        model.doAction(Actions.addNode({ type: 'tab', id, name: fileName(path), component: 'file', config: { path } }, target.getId(), DockLocation.CENTER, -1));
+        const opened = getTab(model, id);
+        if (opened && !isPanelShown(model, opened)) revealTab(model, opened);
+      }
       setActiveFile(path);
     } catch (error) { notify(`Could not open file: ${String(error)}`); }
     finally { opening.current.delete(path); }
@@ -299,10 +309,7 @@ export default function App() {
     const path = await languageWorkspace.resolve(definition.uri);
     if (generation.current === currentGeneration) await openLocation(path, definition.line + 1, definition.character + 1);
   };
-  const showProblems = () => {
-    if (model.getNodeById('problems')) model.doAction(Actions.selectTab('problems'));
-    else model.doAction(Actions.addNode(problemsTab, model.getNodeById('terminals') ? 'terminals' : 'documents', DockLocation.CENTER, 0));
-  };
+  const showPanel = (id: PanelId) => dockPanel(model, getTab(model, id) ?? panelTabs[id]);
 
   const saveFile = useCallback(async (path: string) => {
     if (fileBusyRef.current) return;
@@ -387,16 +394,16 @@ export default function App() {
     const profile = profiles.find(item => item.id === shellId);
     if (!profile?.available) { notify('This terminal is not installed or is still being detected.'); return; }
     const id = `terminal-${crypto.randomUUID()}`;
-    const target = model.getNodeById('terminals') || model.getNodeById('documents');
-    if (target) model.doAction(Actions.addNode({ type: 'tab', id, name: profile.name, component: 'terminal', config: { shellId } }, target.getId(), DockLocation.CENTER, -1));
+    dockPanel(model, { type: 'tab', id, name: profile.name, component: 'terminal', config: { shellId } });
     setTerminalMenu(null);
   };
 
-  const openTerminalMenu = (event: MouseEvent<HTMLButtonElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect();
+  const showTerminalMenu = (anchor: HTMLElement) => {
+    const rect = anchor.getBoundingClientRect();
     setTerminalMenu({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 268)), top: rect.bottom + 240 < window.innerHeight ? rect.bottom + 4 : Math.max(8, rect.top - 240) });
     void loadShells().then(setProfiles).catch(error => notify(`Could not detect shells: ${String(error)}`));
   };
+  const openTerminalMenu = (event: MouseEvent<HTMLButtonElement>) => showTerminalMenu(event.currentTarget);
 
   useEffect(() => { fileIndex.current = null; }, [refresh]);
 
@@ -450,16 +457,16 @@ export default function App() {
       if (event.key.toLowerCase() === 's') { event.preventDefault(); if (activeFile) void saveFile(activeFile); }
       if (event.key.toLowerCase() === 'p') {
         setSearchMode('files');
-        event.preventDefault(); model.doAction(Actions.selectTab('search'));
+        event.preventDefault(); showPanel('search');
         setTimeout(() => document.getElementById('file-search')?.focus(), 0);
       }
       if (event.shiftKey && event.key.toLowerCase() === 'f') {
-        event.preventDefault(); setSearchMode('contents'); model.doAction(Actions.selectTab('search'));
+        event.preventDefault(); setSearchMode('contents'); showPanel('search');
         setTimeout(() => document.getElementById('content-search')?.focus(), 0);
       }
       if (event.shiftKey && event.key.toLowerCase() === 'm') {
         event.preventDefault();
-        showProblems();
+        showPanel('problems');
       }
       if (event.key === '`') { event.preventDefault(); addTerminal(); }
     };
@@ -468,43 +475,50 @@ export default function App() {
   });
 
   const onAction = (action: Action) => {
-    if (action.type === Actions.DELETE_TAB && !allowClose.current) {
-      const tab = model.getNodeById(action.data.node) as TabNode | undefined;
-      const path = tab?.getConfig()?.path;
-      const file = filesRef.current[path];
-      if (file && file.content !== file.saved) {
-        void (native ? confirmDialog(`Discard changes to ${file.name}?`, { title: 'Close file', kind: 'warning' }) : Promise.resolve(window.confirm(`Discard changes to ${file.name}?`))).then(accepted => {
-          if (accepted) {
-            allowClose.current = true; model.doAction(action); allowClose.current = false;
-            setFiles(previous => { const next = { ...previous }; delete next[path]; return next; });
-          }
-        });
-        return undefined;
-      }
-    }
-    if (action.type === Actions.DELETE_TAB) {
-      const tab = model.getNodeById(action.data.node) as TabNode | undefined;
-      const path = tab?.getConfig()?.path;
+    if (action.type !== Actions.DELETE_TAB) return action;
+    const tab = model.getNodeById(action.data.node);
+    if (!(tab instanceof TabNode) || !tab.isCloseable()) return undefined;
+    const path = tab.getConfig()?.path;
+    const forgetFile = () => {
       if (path) setFiles(previous => { const next = { ...previous }; delete next[path]; return next; });
+    };
+    const file = filesRef.current[path];
+    if (file && file.content !== file.saved) {
+      const message = `Discard changes to ${file.name}?`;
+      void (native ? confirmDialog(message, { title: 'Close file', kind: 'warning' }) : Promise.resolve(window.confirm(message))).then(accepted => {
+        if (accepted && sessionRef.current.model === model && model.getNodeById(tab.getId()) === tab) {
+          model.doAction(action);
+          forgetFile();
+        }
+      });
+      return undefined;
     }
+    forgetFile();
     return action;
+  };
+
+  const closeTab = (tab: TabNode) => {
+    const action = onAction(Actions.deleteTab(tab.getId()));
+    if (action) model.doAction(action);
   };
 
   const openGitDiff = (change: GitChange) => {
     const name = `${fileName(change.path)} (Git diff)`;
-    if (model.getNodeById('git-diff')) {
+    if (getTab(model, 'git-diff')) {
       model.doAction(Actions.updateNodeAttributes('git-diff', { name, config: { change } }));
-      model.doAction(Actions.selectTab('git-diff'));
     } else {
-      model.doAction(Actions.addNode({
+      const target = documentTabset(model);
+      if (target) model.doAction(Actions.addNode({
         type: 'tab', id: 'git-diff', component: 'git-diff', enableDrag: false, name, config: { change },
-      }, 'documents', DockLocation.CENTER, -1));
+      }, target.getId(), DockLocation.CENTER, -1));
     }
+    const tab = getTab(model, 'git-diff');
+    if (tab) revealTab(model, tab);
   };
 
   const factory = (node: TabNode): ReactNode => {
     switch (node.getComponent()) {
-      case 'explorer': return <Explorer root={root} blocked={!!recoveryBlocked} refresh={refresh} reveal={reveal} decorations={decorations} onRefresh={() => setRefresh(value => value + 1)} onOpen={path => void openFile(path)} onFolder={() => void openFolder()} onOperation={(operation, returnFocus) => {
+      case 'explorer': return <Explorer root={root} blocked={!!recoveryBlocked} visible={node.isSelected() && isPanelShown(model, node)} refresh={refresh} reveal={reveal} decorations={decorations} onRefresh={() => setRefresh(value => value + 1)} onOpen={path => void openFile(path)} onFolder={() => void openFolder()} onOperation={(operation, returnFocus) => {
         fileOperationFocus.current = returnFocus ?? null;
         setFileOperation(operation);
         setFileError('');
@@ -552,18 +566,46 @@ export default function App() {
   };
 
   const navigationSelected = (id: string) => {
-    const tab = model.getNodeById(id);
-    const parent = tab?.getParent();
-    return (parent instanceof TabSetNode || parent instanceof BorderNode) && parent.getSelectedNode() === tab;
+    const tab = getTab(model, id);
+    return !!tab && isPanelShown(model, tab) && tab.isSelected();
   };
   const gitSelected = navigationSelected('git');
   useEffect(() => {
     if (gitSelected) refreshGit();
   }, [gitSelected, refreshGit]);
 
-  return <div className="app-shell" onContextMenuCapture={event => event.preventDefault()}>
+  const togglePanel = (id: PanelId) => {
+    const tab = getTab(model, id);
+    if (tab && isPanelShown(model, tab)) hidePanels(model, [tab]);
+    else showPanel(id);
+  };
+  const toggleTerminal = (origin: HTMLElement) => {
+    const tabs = terminalTabs(model);
+    if (tabs.some(tab => isPanelShown(model, tab))) hidePanels(model, tabs);
+    else if (tabs.length) {
+      restorePanelSizes(model);
+      tabs.forEach(tab => dockPanel(model, tab, false));
+      revealTab(model, tabs[0]);
+    } else requestAnimationFrame(() => showTerminalMenu(origin));
+  };
+  const restoreWorkspace = () => {
+    restorePanelSizes(model);
+    panelIds.forEach(id => dockPanel(model, getTab(model, id) ?? panelTabs[id], false));
+    terminalTabs(model).forEach(tab => dockPanel(model, tab, false));
+  };
+  const terminalShown = titleMenu?.name === 'View' && terminalTabs(model).some(tab => isPanelShown(model, tab));
+
+  return <div ref={appShell} className="app-shell" onContextMenuCapture={event => event.preventDefault()}>
     <header className={native ? 'titlebar desktop-titlebar' : 'titlebar'} data-tauri-drag-region={native ? '' : undefined}>
-      <div className="app-name"><Code2 size={18} /><strong>leve</strong><span className="preview-tag">{native ? `v${version}` : 'preview'}</span></div>
+      <div className="titlebar-start" data-tauri-drag-region={native ? '' : undefined}>
+        <div className="app-name"><Code2 size={18} /><strong>leve</strong><span className="preview-tag">{native ? `v${version}` : 'preview'}</span></div>
+        <nav className="titlebar-menus" aria-label="Application menus" data-tauri-drag-region="false">
+          {(['File', 'View'] as const).map(name => <button key={name} data-tauri-drag-region="false" aria-haspopup="menu" aria-expanded={titleMenu?.name === name} onClick={event => {
+            const origin = event.currentTarget;
+            setTitleMenu(current => current?.name === name ? null : { name, origin });
+          }}>{name}</button>)}
+        </nav>
+      </div>
       <button ref={projectPicker} className="project-picker" data-tauri-drag-region="false" title={root || 'Switch project'} aria-haspopup="menu" aria-expanded={projectMenu} aria-controls={projectMenu ? 'project-menu' : undefined} disabled={switchingProject} onClick={() => setProjectMenu(value => !value)}><Folder size={13} /><span>{root ? fileName(root) : 'No folder open'}</span><ChevronDown size={12} /></button>
       <div className="titlebar-actions" data-tauri-drag-region="false">
         <button className="icon-button" title="Layout and shortcuts" onClick={() => setSettings(true)}><Settings2 size={16} /></button>
@@ -580,12 +622,27 @@ export default function App() {
       {!recoveryBlocked && !recoveryError && <button className="icon-button" aria-label="Dismiss recovery warning" onClick={() => setRecoveryWarning('')}><X size={15} /></button>}
     </div>}
     <div className="workspace"><aside className="activity-bar" aria-label="Navigation">
-      <button title="Explorer" className="activity-button" aria-pressed={navigationSelected('explorer')} onClick={() => model.doAction(Actions.selectTab('explorer'))}><Files size={19} /></button>
-      <button title="Find files (Ctrl+P)" className="activity-button" aria-pressed={navigationSelected('search')} onClick={() => { model.doAction(Actions.selectTab('search')); setTimeout(() => document.getElementById('file-search')?.focus(), 0); }}><Search size={19} /></button>
-      <button title="Git changes" className="activity-button" aria-pressed={gitSelected} onClick={() => model.doAction(Actions.selectTab('git'))}><GitBranch size={19} /></button>
+      <button title="Explorer" className="activity-button" aria-pressed={navigationSelected('explorer')} onClick={() => showPanel('explorer')}><Files size={19} /></button>
+      <button title="Find files (Ctrl+P)" className="activity-button" aria-pressed={navigationSelected('search')} onClick={() => { showPanel('search'); setTimeout(() => document.getElementById('file-search')?.focus(), 0); }}><Search size={19} /></button>
+      <button title="Git changes" className="activity-button" aria-pressed={gitSelected} onClick={() => showPanel('git')}><GitBranch size={19} /></button>
       <button title="New terminal" className="activity-button" onClick={openTerminalMenu}><TerminalSquare size={21} /></button>
       <div className="activity-spacer" /><button title="Settings" className="activity-button" onClick={() => setSettings(true)}><Settings2 size={21} /></button>
-    </aside><main className="layout-host"><Layout model={model} factory={factory} onAction={onAction}
+    </aside><main className="layout-host" onMouseDownCapture={event => {
+      if (event.button === 1 && event.target instanceof Element && event.target.closest('[role="tab"]')) event.preventDefault();
+    }}><Layout model={model} factory={factory} onAction={onAction}
+      onAuxMouseClick={(node, event) => {
+        if (event.button !== 1 || !(node instanceof TabNode) || !node.isCloseable()) return;
+        event.preventDefault();
+        event.stopPropagation();
+        closeTab(node);
+      }}
+      onContextMenu={(node, event) => {
+        if (!(node instanceof TabNode) || !node.isCloseable()) return;
+        event.stopPropagation();
+        const origin = event.currentTarget;
+        const anchor = event.clientX || event.clientY ? { x: event.clientX, y: event.clientY } : origin;
+        setTabMenu({ tab: node, anchor, origin });
+      }}
       onModelChange={current => {
         persist(current);
         setLayoutVersion(value => value + 1);
@@ -600,8 +657,34 @@ export default function App() {
         const dirty = path && files[path]?.content !== files[path]?.saved;
         if (dirty) values.content = <span>{node.getName()}<span className="dirty-dot" title="Unsaved changes">●</span></span>;
       }}
-      onRenderTabSet={(node, values) => { if (node.getId() === 'terminals') values.buttons.push(<button key="new" className="icon-button" title="New terminal" aria-haspopup="menu" onClick={openTerminalMenu}><Plus size={14} /></button>); }}
-    /></main></div>
+      onRenderTabSet={(node, values) => { if (node === terminalTabset(model)) values.buttons.push(<button key="new" className="icon-button" title="New terminal" aria-haspopup="menu" onClick={openTerminalMenu}><Plus size={14} /></button>); }}
+    />
+      {tabMenu && model.getNodeById(tabMenu.tab.getId()) === tabMenu.tab && <PopupMenu
+        anchor={tabMenu.anchor} container={tabMenu.tab.getLayoutRef() ?? undefined} returnFocusTo={tabMenu.origin}
+        title="Tab actions" items={[{ key: 'close', label: 'Close tab', icon: <X size={14} />, onSelect: () => closeTab(tabMenu.tab) }]}
+        onClose={() => setTabMenu(null)}
+      />}
+    </main></div>
+    {titleMenu && appShell.current && <PopupMenu
+      anchor={{ x: titleMenu.origin.getBoundingClientRect().left, y: titleMenu.origin.getBoundingClientRect().bottom }}
+      container={appShell.current} returnFocusTo={titleMenu.origin} title={titleMenu.name}
+      classNameMapper={name => `${name} ${name.replace('flexlayout__', 'title-menu-')}`}
+      onClose={() => setTitleMenu(null)}
+      items={titleMenu.name === 'File' ? [
+        { key: 'open', label: 'Open folder…', icon: <FolderOpen size={14} />, onSelect: () => void openFolder() },
+        { key: 'recent', label: 'Recent projects…', icon: <Folder size={14} />, onSelect: () => requestAnimationFrame(() => setProjectMenu(true)) },
+        { type: 'divider', key: 'files' },
+        { key: 'save', label: 'Save file', disabled: !activeFile, onSelect: () => void saveFile(activeFile) },
+      ] : [
+        { key: 'restore', label: 'Restore workspace', icon: <LayoutTemplate size={14} />, onSelect: restoreWorkspace },
+        { type: 'divider', key: 'panels' },
+        ...panelIds.map(id => {
+          const shown = isPanelShown(model, getTab(model, id));
+          return { key: id, label: `${shown ? 'Hide' : 'Show'} ${panelTabs[id].name}`, icon: <Check size={14} visibility={shown ? 'visible' : 'hidden'} />, onSelect: () => togglePanel(id) };
+        }),
+        { key: 'terminal', label: `${terminalShown ? 'Hide' : 'Show'} Terminal`, icon: <Check size={14} visibility={terminalShown ? 'visible' : 'hidden'} />, onSelect: () => toggleTerminal(titleMenu.origin) },
+      ]}
+    />}
     <footer className="statusbar"><span className="status-indicator" />{native ? 'Local' : 'Web preview'}<span className="status-divider" /><span>{root ? fileName(root) : 'Demo project'}</span><div className="status-spacer" /><span title={checkpointTime ? `Last recovery checkpoint: ${checkpointTime}` : 'Preparing recovery'}>{recoveryError || recoveryLocked ? 'Recovery unavailable' : checkpointTime ? 'Recovery saved' : 'Recovery pending'}</span><span>Ln {position.line}, Col {position.col}</span><span>UTF-8</span><span>{activeFile ? languageName(activeFile) : 'Leve'}</span></footer>
     {(!sessionReady || closing) && <div className="session-loading" role="status">{closing ? 'Saving session…' : 'Restoring session…'}</div>}
     {notice && <div className="toast" role="status"><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={15} /></button></div>}

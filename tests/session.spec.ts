@@ -54,8 +54,8 @@ test('recovers a checkpoint after an interrupted session without saving project 
 test('reopens the last project and reloads clean files from disk', async ({ page }) => {
   await nativeBridge(page);
   await page.goto('/');
-  await page.getByRole('button', { name: 'No folder open', exact: true }).click();
-  await page.getByRole('menuitem', { name: 'Open another folder…' }).click();
+  await page.getByRole('button', { name: 'File', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Open folder…', exact: true }).click();
   await page.getByRole('button', { name: 'main.py', exact: true }).click();
   await expect(page.locator('.cm-content')).toContainText('original disk content');
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('test-native-session') || '{}').root)).toBe('C:\\project');
@@ -128,7 +128,9 @@ test('switches recent projects without a folder dialog and persists their order'
   await page.evaluate(() => localStorage.setItem('test-next-project', 'C:\\other\\project'));
   await page.locator('.project-picker').click();
   await page.getByRole('menuitem', { name: 'Open another folder…' }).click();
-  await page.locator('.project-picker').click();
+  await page.getByRole('button', { name: 'File', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Recent projects…', exact: true }).click();
+  await expect(page.getByRole('menu', { name: 'Recent projects' })).toBeVisible();
   await expect(page.getByRole('menuitem')).toHaveCount(3);
   await page.getByRole('menuitem').filter({ hasText: 'C:\\project' }).click();
   expect(await page.evaluate(() => localStorage.getItem('test-picker-count'))).toBe('2');
