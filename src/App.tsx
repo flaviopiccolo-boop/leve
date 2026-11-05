@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { Actions, BorderNode, DockLocation, Layout, Model, TabNode, TabSetNode, type Action, type IJsonModel } from 'flexlayout-react';
-import { Blocks, ChevronDown, Code2, FileCode2, Files, Folder, FolderOpen, Keyboard, LayoutTemplate, Plus, Search, Settings2, TerminalSquare, X } from 'lucide-react';
+import { Blocks, ChevronDown, Code2, FileCode2, Files, Folder, FolderOpen, GitBranch, Keyboard, LayoutTemplate, Plus, Search, Settings2, TerminalSquare, X } from 'lucide-react';
 import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import { useTheme } from './theme';
 import { loadShells, previewShells, type ShellProfile } from './shells';
@@ -8,6 +8,7 @@ import { loadSession, restoreFiles, saveSession, type Session } from './session'
 import { loadProjects, rememberProject, sameProject } from './projects';
 import Explorer, { FileDialog } from './Explorer';
 import ContentSearch from './ContentSearch';
+import { gitDecorations, GitDiff, GitPanel, useGitStatus, type GitChange } from './Git';
 import WindowControls from './WindowControls';
 import Problems from './Problems';
 import { LanguageWorkspace, languageFeature, languageFeatures, languageId, type Definition, type LanguageFeature, type LanguageOptions, type Problem } from './language';
@@ -33,6 +34,7 @@ function languageProjects(): LanguagePreference[] {
   } catch { return []; }
 }
 const problemsTab = { type: 'tab', id: 'problems', name: 'Problems', component: 'problems', enableClose: false };
+const gitTab = { type: 'tab', id: 'git', name: 'Git', component: 'git', enableClose: false };
 const Editor = lazy(() => import('./Editor'));
 const Terminal = lazy(() => import('./Terminal'));
 function fileTab(model: Model, path: string): TabNode | undefined {
@@ -44,6 +46,7 @@ function fileTab(model: Model, path: string): TabNode | undefined {
 function selectedFile(model: Model, previous: string): string {
   const active = model.getActiveTabset()?.getSelectedNode();
   if (active?.getComponent() === 'file') return active.getConfig().path;
+  if (active?.getComponent() === 'git-diff') return '';
 
   // Clicking a utility panel keeps the selected editor as the active file.
   const previousTab = previous ? fileTab(model, previous) : undefined;
@@ -61,6 +64,7 @@ const initialLayout = (): IJsonModel => ({
     { type: 'tabset', id: 'navigation', weight: 20, enableDeleteWhenEmpty: false, children: [
       { type: 'tab', id: 'explorer', name: 'Explorer', component: 'explorer', enableClose: false },
       { type: 'tab', id: 'search', name: 'Search', component: 'search', enableClose: false },
+      gitTab,
     ] },
     { type: 'row', weight: 80, children: [
       { type: 'tabset', id: 'documents', weight: 73, enableDeleteWhenEmpty: false, children: [
@@ -76,11 +80,11 @@ function loadLayout(savedLayout?: IJsonModel, restoredFiles?: Set<string>) {
     const raw = savedLayout ? JSON.stringify(savedLayout) : localStorage.getItem(LAYOUT_KEY);
     if (raw) {
       const json = JSON.parse(raw) as IJsonModel;
-      // Restore only validated file buffers, and never restart terminal sessions.
+      // Restore validated file buffers and leave terminal sessions and diff views closed.
       const panelNames: Record<string, string> = { explorer: 'Explorer', search: 'Search', welcome: 'Welcome' };
       const clean = (node: { children?: any[]; component?: string; selected?: number; name?: string; config?: { path?: string } }) => {
         if (node.component && panelNames[node.component]) node.name = panelNames[node.component];
-        if (node.children) node.children = node.children.filter(n => n.component !== 'terminal' && (n.component !== 'file' || restoredFiles?.has(n.config?.path)));
+        if (node.children) node.children = node.children.filter(n => n.component !== 'terminal' && n.component !== 'git-diff' && (n.component !== 'file' || restoredFiles?.has(n.config?.path)));
         if (node.selected !== undefined) node.selected = 0;
         node.children?.forEach(clean);
       };
@@ -89,6 +93,10 @@ function loadLayout(savedLayout?: IJsonModel, restoredFiles?: Set<string>) {
       if (model.getNodeById('explorer') && model.getNodeById('search') && model.getNodeById('documents')) {
         if (!model.getNodeById('problems') && model.getNodeById('terminals')) {
           model.doAction(Actions.addNode(problemsTab, 'terminals', DockLocation.CENTER, 0));
+        }
+        const navigation = model.getNodeById('explorer')?.getParent();
+        if (!model.getNodeById('git') && navigation) {
+          model.doAction(Actions.addNode(gitTab, navigation.getId(), DockLocation.CENTER, -1, false));
         }
         return model;
       }
@@ -112,6 +120,7 @@ export default function App() {
   const [files, setFiles] = useState<Record<string, OpenFile>>({});
   const filesRef = useRef(files); filesRef.current = files;
   const [refresh, setRefresh] = useState(0);
+  const [gitRevision, setGitRevision] = useState(0);
   const [notice, setNotice] = useState('');
   const [settings, setSettings] = useState(false);
   const [projects, setProjects] = useState(loadProjects);
@@ -145,9 +154,22 @@ export default function App() {
   const fileIndex = useRef<Promise<FileEntry[]> | null>(null);
 
   const notify = useCallback((message: string) => setNotice(message), []);
-  const languageRoot = native && root && !recoveryBlocked ? root : null;
-  const languageOptions = enabledLanguageProjects.find(item => languageRoot && sameProject(item.path, languageRoot))?.options ?? defaultLanguageOptions;
-  const languageWorkspace = useMemo(() => languageRoot ? new LanguageWorkspace(languageRoot, notify) : null, [languageRoot, notify]);
+  const localRoot = native && root && !recoveryBlocked ? root : null;
+  const refreshGit = useCallback(() => setGitRevision(value => value + 1), []);
+  const gitProps = {
+    root: localRoot,
+    refresh: `${refresh}:${gitRevision}`,
+    onRefresh: refreshGit,
+  };
+  const gitResult = useGitStatus(localRoot, gitProps.refresh);
+  const decorations = useMemo(() => gitDecorations(gitResult?.data), [gitResult?.data]);
+  useEffect(() => {
+    if (!localRoot) return;
+    window.addEventListener('focus', refreshGit);
+    return () => window.removeEventListener('focus', refreshGit);
+  }, [localRoot, refreshGit]);
+  const languageOptions = enabledLanguageProjects.find(item => localRoot && sameProject(item.path, localRoot))?.options ?? defaultLanguageOptions;
+  const languageWorkspace = useMemo(() => localRoot ? new LanguageWorkspace(localRoot, notify) : null, [localRoot, notify]);
   useEffect(() => () => languageWorkspace?.close(), [languageWorkspace]);
   useEffect(() => {
     if (!languageOptions.python) languageWorkspace?.stop('python');
@@ -292,10 +314,11 @@ export default function App() {
       await writeFile(file);
       if (generation.current !== currentGeneration) return;
       setFiles(previous => previous[path] ? ({ ...previous, [path]: { ...previous[path], saved: file.content } }) : previous);
+      refreshGit();
       notify(root ? `${file.name} saved.` : `${file.name} saved only in this demo session.`);
     } catch (error) { notify(`Could not save file: ${String(error)}`); }
     finally { saving.current.delete(path); }
-  }, [notify, root, recoveryBlocked]);
+  }, [notify, root, recoveryBlocked, refreshGit]);
 
   const applyFileOperation = async (name: string) => {
     if (!fileOperation || fileBusyRef.current) return;
@@ -466,9 +489,21 @@ export default function App() {
     return action;
   };
 
+  const openGitDiff = (change: GitChange) => {
+    const name = `${fileName(change.path)} (Git diff)`;
+    if (model.getNodeById('git-diff')) {
+      model.doAction(Actions.updateNodeAttributes('git-diff', { name, config: { change } }));
+      model.doAction(Actions.selectTab('git-diff'));
+    } else {
+      model.doAction(Actions.addNode({
+        type: 'tab', id: 'git-diff', component: 'git-diff', enableDrag: false, name, config: { change },
+      }, 'documents', DockLocation.CENTER, -1));
+    }
+  };
+
   const factory = (node: TabNode): ReactNode => {
     switch (node.getComponent()) {
-      case 'explorer': return <Explorer root={root} blocked={!!recoveryBlocked} refresh={refresh} reveal={reveal} onRefresh={() => setRefresh(value => value + 1)} onOpen={path => void openFile(path)} onFolder={() => void openFolder()} onOperation={(operation, returnFocus) => {
+      case 'explorer': return <Explorer root={root} blocked={!!recoveryBlocked} refresh={refresh} reveal={reveal} decorations={decorations} onRefresh={() => setRefresh(value => value + 1)} onOpen={path => void openFile(path)} onFolder={() => void openFolder()} onOperation={(operation, returnFocus) => {
         fileOperationFocus.current = returnFocus ?? null;
         setFileOperation(operation);
         setFileError('');
@@ -481,6 +516,11 @@ export default function App() {
         {matches.map(entry => <button className="search-result" key={entry.path} onClick={() => void openFile(entry.path)}><FileCode2 size={14} /><span>{entry.name}<small>{entry.path}</small></span></button>)}
         {query && <p className="panel-description">Up to 5,000 files · skips dependencies and build folders.</p>}
       </>}</div>;
+      case 'git': return <GitPanel root={localRoot} onRefresh={refreshGit} result={gitResult} onOpen={openGitDiff} />;
+      case 'git-diff': {
+        const change: GitChange = node.getConfig().change;
+        return <GitDiff key={`${change.kind}:${change.path}`} {...gitProps} change={change} />;
+      }
       case 'file': {
         const file = files[node.getConfig().path];
         if (!file) return null;
@@ -515,6 +555,10 @@ export default function App() {
     const parent = tab?.getParent();
     return (parent instanceof TabSetNode || parent instanceof BorderNode) && parent.getSelectedNode() === tab;
   };
+  const gitSelected = navigationSelected('git');
+  useEffect(() => {
+    if (gitSelected) refreshGit();
+  }, [gitSelected, refreshGit]);
 
   return <div className="app-shell" onContextMenuCapture={event => event.preventDefault()}>
     <header className={native ? 'titlebar desktop-titlebar' : 'titlebar'} data-tauri-drag-region={native ? '' : undefined}>
@@ -537,6 +581,7 @@ export default function App() {
     <div className="workspace"><aside className="activity-bar" aria-label="Navigation">
       <button title="Explorer" className="activity-button" aria-pressed={navigationSelected('explorer')} onClick={() => model.doAction(Actions.selectTab('explorer'))}><Files size={19} /></button>
       <button title="Find files (Ctrl+P)" className="activity-button" aria-pressed={navigationSelected('search')} onClick={() => { model.doAction(Actions.selectTab('search')); setTimeout(() => document.getElementById('file-search')?.focus(), 0); }}><Search size={19} /></button>
+      <button title="Git changes" className="activity-button" aria-pressed={gitSelected} onClick={() => model.doAction(Actions.selectTab('git'))}><GitBranch size={19} /></button>
       <button title="New terminal" className="activity-button" onClick={openTerminalMenu}><TerminalSquare size={21} /></button>
       <div className="activity-spacer" /><button title="Settings" className="activity-button" onClick={() => setSettings(true)}><Settings2 size={21} /></button>
     </aside><main className="layout-host"><Layout model={model} factory={factory} onAction={onAction}

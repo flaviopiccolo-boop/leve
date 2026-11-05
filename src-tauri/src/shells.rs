@@ -23,6 +23,14 @@ fn in_folder(variable: &str, relative: &str) -> Option<PathBuf> {
     env::var_os(variable).map(|root| PathBuf::from(root).join(relative)).filter(|path| path.is_file())
 }
 
+#[cfg(windows)]
+pub(crate) fn git_executable() -> Option<PathBuf> {
+    on_path("git.exe")
+        .or_else(|| in_folder("ProgramFiles", r"Git\cmd\git.exe"))
+        .or_else(|| in_folder("ProgramFiles(x86)", r"Git\cmd\git.exe"))
+        .or_else(|| in_folder("LOCALAPPDATA", r"Programs\Git\cmd\git.exe"))
+}
+
 fn executable(id: &str) -> Option<PathBuf> {
     match id {
         "powershell" => in_folder("SystemRoot", r"System32\WindowsPowerShell\v1.0\powershell.exe").or_else(|| on_path("powershell.exe")),

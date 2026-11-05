@@ -54,6 +54,7 @@ Native Windows file drag-and-drop is disabled in the WebView to allow HTML panel
 - Project switcher in the title bar with persistent recent-folder history, most recently opened first. Each entry shows its full path to distinguish folders with the same name. **Open another folder…** opens the folder dialog. Switching projects checks for unsaved changes; unavailable folders keep the current project open.
 - Explorer file and folder creation, renaming, and confirmed permanent deletion, with open-buffer updates and workspace path checks.
 - Project-wide literal content search, optional case-sensitive matching, cancellation, and clickable results with editor selection.
+- Read-only Git panel with staged, working tree, and untracked changes and inline diffs.
 
 ## File management and project search
 
@@ -83,6 +84,18 @@ Press **Ctrl+Space** for completion or **F12** to open a definition inside the w
 
 The desktop title bar is part of Leve's interface and follows its theme. Drag the empty area to move the window or double-click it to maximize or restore. Closing from the title bar uses the session recovery flow.
 
+## Git changes
+
+With Git for Windows installed, open a repository folder in the desktop app and select **Git changes** in the activity bar. The panel groups files by staged changes, working tree changes, and untracked files. Click a file to see its unified diff in a read-only tab. A file with both staged and unstaged edits appears in both groups. Renames appear as a deletion and an addition.
+
+The staged diff compares the index to the last commit. The working tree diff compares saved content to the index, and untracked files are shown as additions. Save edits before inspecting their diff. The panel and Explorer update after a save or file operation in Leve. Use **Refresh Git changes** after running Git commands in the integrated terminal.
+
+Leve checks the open folder and its immediate subfolders for repositories, skipping `node_modules`. You can open a parent folder and see changes in a repository such as `app/`. If the repository starts above the open folder, Leve lists only the changes within that folder. If no repository is found, the panel shows how to initialize one with `git init`.
+
+The Explorer colors changed file names and shows status badges. Folders with changed descendants are marked as well. The colors follow the [default Git palette in VS Code](https://github.com/microsoft/vscode/blob/main/extensions/git/package.json#L4159-L4248) for the corresponding light or dark theme.
+
+Git describes binary changes in the patch header. The viewer supports patches up to 256 KiB, and untracked files up to 4 MB.
+
 ## Session recovery
 
 The desktop app checkpoints the current session to its local application data directory, under `recovery/session.json`, roughly every 400 ms while state changes. A normal window close waits for the latest checkpoint. Files in the project are written only when you explicitly save them.
@@ -97,7 +110,7 @@ The status bar shows **Recovery pending**, **Recovery saved**, or **Recovery una
 
 - Automated tests cover the web interface and backend operations. Rust tests include a real PowerShell/ConPTY session with UTF-8 output and a batch file running in a folder with spaces and non-ASCII characters. The complete desktop UI flow still requires manual validation.
 - UTF-8 text files up to 4 MB. Editing may normalize line endings to LF. Binary files are rejected.
-- No Git integration, debugging, extensions, or automatic updates. Go to Definition is limited to files inside the open workspace.
+- No debugging, extensions, or automatic updates. Go to Definition is limited to files inside the open workspace.
 - Project content search covers saved files with the documented exclusions and limits. Use Ctrl+F to search the active buffer, including unsaved edits.
 - No automatic filesystem watching. Refresh the tree manually. A save conflict requires copying your changes and reopening the file.
 - Recovery restores the most recent completed checkpoint; it is not a substitute for saving project files or version control.

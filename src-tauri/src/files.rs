@@ -2,7 +2,7 @@ use std::{fs, path::{Component, Path, PathBuf}};
 use tauri::State;
 use crate::{error, workspace_root, Workspace};
 
-fn linked(metadata: &fs::Metadata) -> bool {
+pub(crate) fn linked(metadata: &fs::Metadata) -> bool {
     #[cfg(windows)] {
         use std::os::windows::fs::MetadataExt;
         metadata.file_attributes() & 0x400 != 0
@@ -105,7 +105,7 @@ fn delete(root: &Path, path: &str) -> Result<(), String> {
     else { fs::remove_file(target).map_err(error) }
 }
 
-fn current_root(state: &Workspace, expected_root: &str) -> Result<PathBuf, String> {
+pub(crate) fn current_root(state: &Workspace, expected_root: &str) -> Result<PathBuf, String> {
     let root = workspace_root(state)?;
     if dunce::simplified(&root).to_string_lossy() != expected_root { return Err("The project changed. Try the operation again.".into()); }
     Ok(root)
