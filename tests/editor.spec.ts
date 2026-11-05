@@ -101,6 +101,7 @@ test('updates built-in labels in layouts saved by older versions', async ({ page
 test('switches themes without losing edits or undo history and saves the preference', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await expect(page.locator('.activity-bar')).toHaveCSS('background-color', 'rgb(39, 40, 44)');
   await page.getByRole('button', { name: 'main.py', exact: true }).click();
   const code = page.locator('.cm-content');
   await code.click();
@@ -112,7 +113,8 @@ test('switches themes without losing edits or undo history and saves the prefere
   await page.getByRole('button', { name: 'Close settings' }).click();
   await expect(code).toContainText('# preserve theme change');
   await expect(page.locator('.cm-editor')).toHaveCSS('background-color', 'rgb(255, 255, 255)');
-  await expect(page.getByRole('button', { name: 'main.py', exact: true })).toHaveCSS('color', 'rgb(52, 64, 84)');
+  await expect(page.locator('.activity-bar')).toHaveCSS('background-color', 'rgb(238, 245, 249)');
+  await expect(page.getByRole('button', { name: 'main.py', exact: true })).toHaveCSS('color', 'rgb(48, 55, 61)');
   await code.click();
   await page.keyboard.press('Control+z');
   await expect(code).not.toContainText('# preserve theme change');
@@ -196,4 +198,46 @@ test('desktop shell selection starts immediately and keeps other terminal sessio
   await page.getByRole('menuitem', { name: 'PowerShell', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('Shell startup failed');
   await expect(page.getByRole('button', { name: /^Start / })).toHaveCount(0);
+});
+
+test('the desktop title bar controls the window and closes through session recovery', async ({ page }) => {
+  await page.addInitScript(() => {
+    let maximized = false;
+    let callbackId = 0;
+    const callbacks = new Map<number, (event: unknown) => void>();
+    const listeners = new Map<string, number>();
+    const calls: string[] = [];
+    Object.assign(window, { isTauri: true, windowCalls: calls, __TAURI_INTERNALS__: {
+      metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+      transformCallback: (callback: (event: unknown) => void) => { callbacks.set(++callbackId, callback); return callbackId; },
+      unregisterCallback: () => {},
+      invoke: async (command: string, args: any = {}) => {
+        if (command === 'list_shells') return [];
+        if (command === 'session_load') return null;
+        if (command === 'plugin:event|listen') {
+          listeners.set(args.event, args.handler);
+          return args.handler;
+        }
+        if (command === 'plugin:window|is_maximized') return maximized;
+        calls.push(command);
+        if (command === 'plugin:window|toggle_maximize') maximized = !maximized;
+        if (command === 'plugin:window|close') {
+          const id = listeners.get('tauri://close-requested');
+          if (id != null) callbacks.get(id)?.({ id, event: 'tauri://close-requested', payload: null });
+        }
+      },
+    } });
+  });
+  await page.goto('/');
+  const header = page.getByRole('banner');
+  await expect(header).toHaveAttribute('data-tauri-drag-region', '');
+  await header.getByRole('button', { name: 'Minimize window' }).click();
+  await header.getByRole('button', { name: 'Maximize window' }).click();
+  await header.getByRole('button', { name: 'Restore window' }).click();
+  await expect(header.getByRole('button', { name: 'Maximize window' })).toBeVisible();
+  await page.evaluate(() => ((window as any).windowCalls as string[]).splice(0));
+  await header.getByRole('button', { name: 'Close window' }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).windowCalls)).toEqual([
+    'plugin:window|close', 'session_save', 'plugin:window|destroy',
+  ]);
 });

@@ -1,8 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { ChevronDown, ChevronRight, FileCode2, FilePlus2, Folder, FolderOpen, FolderPlus, MoreHorizontal, RefreshCw, X } from 'lucide-react';
 import { fileName, listFiles, native, type FileEntry, type FileOperation } from './workspace';
 
-function Tree({ path = '', depth = 0, refresh, reveal, onOpen, onMenu }: { path?: string; depth?: number; refresh: number; reveal: string; onOpen: (path: string) => void; onMenu: (entry: FileEntry, x: number, y: number) => void }) {
+type StartOperation = (operation: FileOperation, returnFocus?: HTMLElement | null) => void;
+
+function Tree({ path = '', depth = 0, refresh, reveal, onOpen, onMenu, onOperation }: {
+  path?: string; depth?: number; refresh: number; reveal: string;
+  onOpen: (path: string) => void;
+  onMenu: (entry: FileEntry, x: number, y: number) => void;
+  onOperation?: StartOperation;
+}) {
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [expanded, setExpanded] = useState(new Set(['src']));
   const [error, setError] = useState('');
@@ -19,9 +26,53 @@ function Tree({ path = '', depth = 0, refresh, reveal, onOpen, onMenu }: { path?
       return next;
     });
   }, [reveal]);
+
+  const handleEntryKey = (event: KeyboardEvent<HTMLButtonElement>, entry: FileEntry) => {
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    const button = event.currentTarget;
+    if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+      event.preventDefault();
+      const rect = button.getBoundingClientRect();
+      onMenu(entry, rect.left, rect.bottom);
+      return;
+    }
+    if (event.shiftKey) return;
+    if (onOperation && (event.key === 'F2' || event.key === 'Delete')) {
+      event.preventDefault();
+      if (!event.repeat) onOperation({ kind: event.key === 'F2' ? 'rename' : 'delete', entry }, button);
+      return;
+    }
+    if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const rows = Array.from(button.closest('.explorer-tree')!.querySelectorAll<HTMLButtonElement>('.tree-item'));
+    const index = rows.indexOf(button);
+    switch (event.key) {
+      case 'ArrowUp': rows[index - 1]?.focus(); break;
+      case 'ArrowDown': rows[index + 1]?.focus(); break;
+      case 'Home': rows[0]?.focus(); break;
+      case 'End': rows.at(-1)?.focus(); break;
+      case 'ArrowRight':
+        if (!entry.directory) break;
+        if (!expanded.has(entry.path)) setExpanded(previous => new Set(previous).add(entry.path));
+        else if (rows[index + 1]?.title.startsWith(entry.path + '/')) rows[index + 1].focus();
+        break;
+      case 'ArrowLeft':
+        if (entry.directory && expanded.has(entry.path)) {
+          setExpanded(previous => {
+            const next = new Set(previous);
+            next.delete(entry.path);
+            return next;
+          });
+        } else {
+          rows.find(row => row.title === path)?.focus();
+        }
+        break;
+    }
+  };
   return <>{error && <p className="inline-error">{error}</p>}{entries.map(entry => <div key={entry.path}>
-    <div className="tree-row" onContextMenu={event => { event.preventDefault(); onMenu(entry, event.clientX, event.clientY); }}>
-      <button className="tree-item" style={{ paddingLeft: 12 + depth * 15 }} title={entry.path} aria-expanded={entry.directory ? expanded.has(entry.path) : undefined} onClick={() => {
+    <div className="tree-row" onContextMenu={event => onMenu(entry, event.clientX, event.clientY)}>
+      <button className="tree-item" style={{ paddingLeft: 12 + depth * 15 }} title={entry.path} aria-expanded={entry.directory ? expanded.has(entry.path) : undefined}
+        aria-keyshortcuts={onOperation ? 'Delete F2 Shift+F10' : undefined} onKeyDown={event => handleEntryKey(event, entry)} onClick={() => {
         if (!entry.directory) onOpen(entry.path);
         else setExpanded(previous => { const next = new Set(previous); if (next.has(entry.path)) next.delete(entry.path); else next.add(entry.path); return next; });
       }}>
@@ -30,30 +81,72 @@ function Tree({ path = '', depth = 0, refresh, reveal, onOpen, onMenu }: { path?
       </button>
       <button className="icon-button tree-more" aria-label={`Actions for ${entry.path}`} onClick={event => { const rect = event.currentTarget.getBoundingClientRect(); onMenu(entry, rect.left, rect.bottom); }}><MoreHorizontal size={14} /></button>
     </div>
-    {entry.directory && expanded.has(entry.path) && <Tree path={entry.path} depth={depth + 1} refresh={refresh} reveal={reveal} onOpen={onOpen} onMenu={onMenu} />}
+    {entry.directory && expanded.has(entry.path) && <Tree path={entry.path} depth={depth + 1} refresh={refresh} reveal={reveal} onOpen={onOpen} onMenu={onMenu} onOperation={onOperation} />}
   </div>)}</>;
 }
 
-export default function Explorer({ root, blocked, refresh, reveal, onRefresh, onOpen, onFolder, onOperation }: { root: string | null; blocked: boolean; refresh: number; reveal: string; onRefresh: () => void; onOpen: (path: string) => void; onFolder: () => void; onOperation: (operation: FileOperation) => void }) {
-  const [menu, setMenu] = useState<{ entry: FileEntry; left: number; top: number } | null>(null);
+export default function Explorer({ root, blocked, refresh, reveal, onRefresh, onOpen, onFolder, onOperation }: { root: string | null; blocked: boolean; refresh: number; reveal: string; onRefresh: () => void; onOpen: (path: string) => void; onFolder: () => void; onOperation: StartOperation }) {
+  const [menu, setMenu] = useState<{ entry: FileEntry | null; left: number; top: number } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuOrigin = useRef<HTMLElement | null>(null);
   const enabled = !blocked && (!native || !!root);
-  const action = (operation: FileOperation) => { setMenu(null); onOperation(operation); };
+  const action: StartOperation = (operation, returnFocus) => {
+    setMenu(null);
+    onOperation(operation, returnFocus);
+  };
+  const menuAction = (operation: FileOperation) => action(operation, menuOrigin.current);
+  const openMenu = (entry: FileEntry | null, x: number, y: number) => {
+    if (!enabled) return;
+    const active = document.activeElement;
+    menuOrigin.current = active instanceof HTMLElement && !menuRef.current?.contains(active) ? active : null;
+    setMenu({
+      entry,
+      left: Math.max(8, Math.min(x, window.innerWidth - 210)),
+      top: Math.max(8, Math.min(y, window.innerHeight - 200)),
+    });
+  };
+  useEffect(() => {
+    const element = menuRef.current;
+    if (!element) return;
+    const dismissOutside = (event: PointerEvent) => {
+      if (!element.contains(event.target as Node)) setMenu(null);
+    };
+    element.ownerDocument.addEventListener('pointerdown', dismissOutside, true);
+    return () => element.ownerDocument.removeEventListener('pointerdown', dismissOutside, true);
+  }, [menu]);
+  const entry = menu?.entry;
+  const parent = entry?.path ?? '';
   return <div className="explorer panel-scroll">
     <div className="panel-heading"><span>PROJECT FOLDER</span><div>
-      <button className="icon-button" title="New file" disabled={!enabled} onClick={() => action({ kind: 'file', parent: '' })}><FilePlus2 size={14} /></button>
-      <button className="icon-button" title="New folder" disabled={!enabled} onClick={() => action({ kind: 'folder', parent: '' })}><FolderPlus size={14} /></button>
+      <button className="icon-button" title="New file" disabled={!enabled} onClick={event => action({ kind: 'file', parent: '' }, event.currentTarget)}><FilePlus2 size={14} /></button>
+      <button className="icon-button" title="New folder" disabled={!enabled} onClick={event => action({ kind: 'folder', parent: '' }, event.currentTarget)}><FolderPlus size={14} /></button>
       <button className="icon-button" title="Refresh files" onClick={onRefresh}><RefreshCw size={13} /></button>
       <button className="icon-button" title="Open folder" onClick={onFolder}><FolderOpen size={15} /></button>
     </div></div>
     <div className="project-heading"><ChevronDown size={13} /><span>{root ? fileName(root) : 'example-project'}</span>{!root && <span className="demo-badge">DEMO</span>}</div>
-    {blocked ? <p className="panel-description">Project unavailable. Recovered files remain open.</p> : <Tree key={root ?? 'demo'} refresh={refresh} reveal={reveal} onOpen={onOpen} onMenu={(entry, x, y) => { if (enabled) setMenu({ entry, left: Math.max(8, Math.min(x, window.innerWidth - 210)), top: Math.max(8, Math.min(y, window.innerHeight - 200)) }); }} />}
-    <button className="open-folder-link" onClick={onFolder}><FolderOpen size={14} /> Open another folder</button>
-    {menu && <div className="terminal-menu-backdrop" onClick={() => setMenu(null)} onKeyDown={event => { if (event.key === 'Escape') setMenu(null); if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button')); const index = buttons.indexOf(document.activeElement as HTMLButtonElement); buttons[(index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus(); } }}>
-      <div className="terminal-menu file-menu" role="menu" aria-label={`Actions for ${menu.entry.name}`} style={{ left: menu.left, top: menu.top }} onClick={event => event.stopPropagation()}>
-        {menu.entry.directory && <><button role="menuitem" onClick={() => action({ kind: 'file', parent: menu.entry.path })}>New file…</button><button role="menuitem" onClick={() => action({ kind: 'folder', parent: menu.entry.path })}>New folder…</button></>}
-        <button autoFocus role="menuitem" onClick={() => action({ kind: 'rename', entry: menu.entry })}>Rename…</button>
-        <button role="menuitem" onClick={() => action({ kind: 'delete', entry: menu.entry })}>Delete…</button>
-      </div>
+    {blocked ? <p className="panel-description">Project unavailable. Recovered files remain open.</p> : <div className="explorer-tree"><Tree key={root ?? 'demo'} refresh={refresh} reveal={reveal} onOpen={onOpen} onMenu={openMenu} onOperation={enabled ? action : undefined} /></div>}
+    <div className="explorer-root-space" onContextMenu={event => openMenu(null, event.clientX, event.clientY)} />
+    {menu && <div key={parent} ref={menuRef} className="terminal-menu file-menu" role="menu" aria-label={entry ? `Actions for ${entry.name}` : 'Project root actions'} style={{ left: menu.left, top: menu.top }} onKeyDown={event => {
+      if (event.key === 'Escape') {
+        event.stopPropagation();
+        setMenu(null);
+        menuOrigin.current?.focus();
+      }
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+      event.preventDefault();
+      const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button'));
+      const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      const step = event.key === 'ArrowDown' ? 1 : -1;
+      buttons[(index + step + buttons.length) % buttons.length]?.focus();
+    }}>
+      {(!entry || entry.directory) && <>
+        <button autoFocus role="menuitem" onClick={() => menuAction({ kind: 'file', parent })}>New file…</button>
+        <button role="menuitem" onClick={() => menuAction({ kind: 'folder', parent })}>New folder…</button>
+      </>}
+      {entry && <>
+        <button autoFocus={!entry.directory} role="menuitem" aria-keyshortcuts="F2" onClick={() => menuAction({ kind: 'rename', entry })}>Rename… <small aria-hidden="true">F2</small></button>
+        <button role="menuitem" aria-keyshortcuts="Delete" onClick={() => menuAction({ kind: 'delete', entry })}>Delete… <small aria-hidden="true">Delete</small></button>
+      </>}
     </div>}
   </div>;
 }

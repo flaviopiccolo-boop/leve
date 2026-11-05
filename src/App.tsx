@@ -1,5 +1,5 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
-import { Actions, DockLocation, Layout, Model, TabNode, type Action, type IJsonModel } from 'flexlayout-react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'react';
+import { Actions, BorderNode, DockLocation, Layout, Model, TabNode, TabSetNode, type Action, type IJsonModel } from 'flexlayout-react';
 import { Blocks, ChevronDown, Code2, FileCode2, Files, Folder, FolderOpen, Keyboard, LayoutTemplate, Plus, Search, Settings2, TerminalSquare, X } from 'lucide-react';
 import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import { useTheme } from './theme';
@@ -8,15 +8,51 @@ import { loadSession, restoreFiles, saveSession, type Session } from './session'
 import { loadProjects, rememberProject, sameProject } from './projects';
 import Explorer, { FileDialog } from './Explorer';
 import ContentSearch from './ContentSearch';
-import { activateWorkspace, fileName, indexFiles, languageName, mutateEntry, native, pickWorkspace, readFile, withinEntry, writeFile, type ContentMatch, type FileEntry, type FileOperation, type OpenFile } from './workspace';
+import WindowControls from './WindowControls';
+import Problems from './Problems';
+import { LanguageWorkspace, languageFeature, languageFeatures, languageId, type Definition, type LanguageFeature, type LanguageOptions, type Problem } from './language';
+import type { EditorJump } from './Editor';
+import { activateWorkspace, fileName, indexFiles, languageName, mutateEntry, native, pickWorkspace, readFile, withinEntry, writeFile, type FileEntry, type FileOperation, type OpenFile } from './workspace';
 
 const LAYOUT_KEY = 'leve.layout.v1';
+const LANGUAGE_KEY = 'leve.language-projects.v1';
+type LanguagePreference = { path: string; options: LanguageOptions };
+const defaultLanguageOptions: LanguageOptions = { python: false, typescript: false, javascript: false, eslint: false };
+const featureKeys = Object.keys(languageFeatures) as LanguageFeature[];
+function languageProjects(): LanguagePreference[] {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(LANGUAGE_KEY) ?? '[]');
+    if (!Array.isArray(saved)) return [];
+    return saved.flatMap(item => {
+      if (typeof item === 'string') return [{ path: item, options: { python: true, typescript: true, javascript: true, eslint: true } }];
+      if (!item || typeof item.path !== 'string' || !item.options) return [];
+      const options = { ...defaultLanguageOptions };
+      for (const feature of featureKeys) options[feature] = item.options[feature] === true;
+      return [{ path: item.path, options }];
+    });
+  } catch { return []; }
+}
+const problemsTab = { type: 'tab', id: 'problems', name: 'Problems', component: 'problems', enableClose: false };
 const Editor = lazy(() => import('./Editor'));
 const Terminal = lazy(() => import('./Terminal'));
 function fileTab(model: Model, path: string): TabNode | undefined {
   let found: TabNode | undefined;
   model.visitNodes(node => { if (node instanceof TabNode && node.getComponent() === 'file' && node.getConfig()?.path === path) found = node; });
   return found;
+}
+
+function selectedFile(model: Model, previous: string): string {
+  const active = model.getActiveTabset()?.getSelectedNode();
+  if (active?.getComponent() === 'file') return active.getConfig().path;
+
+  // Clicking a utility panel keeps the selected editor as the active file.
+  const previousTab = previous ? fileTab(model, previous) : undefined;
+  const parent = previousTab?.getParent();
+  if ((parent instanceof TabSetNode || parent instanceof BorderNode) && parent.getSelectedNode() === previousTab) return previous;
+
+  const documents = model.getNodeById('documents');
+  const document = documents instanceof TabSetNode ? documents.getSelectedNode() : undefined;
+  return document?.getComponent() === 'file' ? document.getConfig().path : '';
 }
 const initialLayout = (): IJsonModel => ({
   global: { tabEnableRename: false, tabSetEnableClose: false, tabSetMinWidth: 170, tabSetMinHeight: 100, tabSetEnableMaximize: true },
@@ -30,7 +66,7 @@ const initialLayout = (): IJsonModel => ({
       { type: 'tabset', id: 'documents', weight: 73, enableDeleteWhenEmpty: false, children: [
         { type: 'tab', id: 'welcome', name: 'Welcome', component: 'welcome', enableClose: false },
       ] },
-      { type: 'tabset', id: 'terminals', weight: 27, enableDeleteWhenEmpty: false, children: [] },
+      { type: 'tabset', id: 'terminals', weight: 27, enableDeleteWhenEmpty: false, children: [problemsTab] },
     ] },
   ] },
 });
@@ -50,7 +86,12 @@ function loadLayout(savedLayout?: IJsonModel, restoredFiles?: Set<string>) {
       };
       clean(json.layout);
       const model = Model.fromJson(json);
-      if (model.getNodeById('explorer') && model.getNodeById('search') && model.getNodeById('documents')) return model;
+      if (model.getNodeById('explorer') && model.getNodeById('search') && model.getNodeById('documents')) {
+        if (!model.getNodeById('problems') && model.getNodeById('terminals')) {
+          model.doAction(Actions.addNode(problemsTab, 'terminals', DockLocation.CENTER, 0));
+        }
+        return model;
+      }
     }
   } catch { /* Fall back to the standard layout if stored data is incompatible. */ }
   return Model.fromJson(initialLayout());
@@ -60,7 +101,10 @@ export default function App() {
   const { theme, setTheme } = useTheme();
   const [model, setModel] = useState(loadLayout);
   const [root, setRoot] = useState<string | null>(null);
+  const [enabledLanguageProjects, setEnabledLanguageProjects] = useState(languageProjects);
+  const [problemsByFile, setProblemsByFile] = useState<Record<string, Problem[]>>({});
   const [fileOperation, setFileOperation] = useState<FileOperation | null>(null);
+  const fileOperationFocus = useRef<HTMLElement | null>(null);
   const [fileError, setFileError] = useState('');
   const [fileBusy, setFileBusy] = useState(false);
   const fileBusyRef = useRef(false);
@@ -80,7 +124,7 @@ export default function App() {
   const [matches, setMatches] = useState<FileEntry[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchMode, setSearchMode] = useState<'files' | 'contents'>('files');
-  const [jump, setJump] = useState<(ContentMatch & { token: string }) | null>(null);
+  const [jump, setJump] = useState<EditorJump | null>(null);
   const [position, setPosition] = useState({ line: 1, col: 1 });
   const [activeFile, setActiveFile] = useState('');
   const [sessionReady, setSessionReady] = useState(false);
@@ -101,6 +145,40 @@ export default function App() {
   const fileIndex = useRef<Promise<FileEntry[]> | null>(null);
 
   const notify = useCallback((message: string) => setNotice(message), []);
+  const languageRoot = native && root && !recoveryBlocked ? root : null;
+  const languageOptions = enabledLanguageProjects.find(item => languageRoot && sameProject(item.path, languageRoot))?.options ?? defaultLanguageOptions;
+  const languageWorkspace = useMemo(() => languageRoot ? new LanguageWorkspace(languageRoot, notify) : null, [languageRoot, notify]);
+  useEffect(() => () => languageWorkspace?.close(), [languageWorkspace]);
+  useEffect(() => {
+    if (!languageOptions.python) languageWorkspace?.stop('python');
+    if (!languageOptions.typescript && !languageOptions.javascript) languageWorkspace?.stop('typescript');
+  }, [languageOptions, languageWorkspace]);
+
+  const toggleLanguageSupport = (feature: LanguageFeature, enabled: boolean) => {
+    if (!root) return;
+    const next = enabledLanguageProjects.filter(item => !sameProject(item.path, root));
+    next.push({ path: root, options: { ...languageOptions, [feature]: enabled } });
+    setEnabledLanguageProjects(next);
+    try { localStorage.setItem(LANGUAGE_KEY, JSON.stringify(next)); } catch { /* The setting still works for this session. */ }
+  };
+  const reportProblems = useCallback((path: string, issues: Problem[]) => {
+    setProblemsByFile(previous => {
+      if (issues.length) return { ...previous, [path]: issues };
+      if (!Object.hasOwn(previous, path)) return previous;
+      const next = { ...previous };
+      delete next[path];
+      return next;
+    });
+  }, []);
+  const problemsFile = activeFile && Object.hasOwn(files, activeFile) ? activeFile : '';
+  const problems = useMemo(() => (problemsByFile[problemsFile] ?? [])
+    .filter(problem => {
+      if (problem.source === 'ESLint') return languageOptions.eslint;
+      const feature = languageFeature(languageId(problem.path));
+      return feature !== null && languageOptions[feature];
+    })
+    .sort((a, b) => a.line - b.line || a.column - b.column),
+  [problemsByFile, problemsFile, languageOptions]);
   const remember = useCallback((path: string) => {
     try { setProjects(rememberProject(path)); }
     catch { notify('The project opened, but its history could not be saved.'); }
@@ -186,6 +264,23 @@ export default function App() {
     finally { opening.current.delete(path); }
   }, [model, notify, recoveryBlocked]);
 
+  const openLocation = async (path: string, line: number, column: number) => {
+    const currentGeneration = generation.current;
+    await openFile(path);
+    if (generation.current !== currentGeneration) return;
+    setJump({ path, line, column, token: crypto.randomUUID() });
+  };
+  const goToDefinition = async (definition: Definition) => {
+    if (!languageWorkspace) return;
+    const currentGeneration = generation.current;
+    const path = await languageWorkspace.resolve(definition.uri);
+    if (generation.current === currentGeneration) await openLocation(path, definition.line + 1, definition.character + 1);
+  };
+  const showProblems = () => {
+    if (model.getNodeById('problems')) model.doAction(Actions.selectTab('problems'));
+    else model.doAction(Actions.addNode(problemsTab, model.getNodeById('terminals') ? 'terminals' : 'documents', DockLocation.CENTER, 0));
+  };
+
   const saveFile = useCallback(async (path: string) => {
     if (fileBusyRef.current) return;
     if (recoveryBlocked) { notify('Reopen the original project before saving recovered changes to disk.'); return; }
@@ -223,7 +318,7 @@ export default function App() {
           } else if (tab) model.doAction(Actions.deleteTab(tab.getId()));
         }
         filesRef.current = updated; setFiles(updated);
-        if (withinEntry(activeFile, source)) setActiveFile(fileOperation.kind === 'rename' ? target + activeFile.slice(source.length) : '');
+        if (fileOperation.kind === 'rename' && withinEntry(activeFile, source)) setActiveFile(target + activeFile.slice(source.length));
       }
       setQuery(''); setMatches([]); setRefresh(value => value + 1); setReveal(target);
       setFileOperation(null);
@@ -256,7 +351,7 @@ export default function App() {
       const selected = await activateWorkspace(selectedPath);
       remember(selected);
       generation.current += 1;
-      setRoot(selected); setFiles({}); setActiveFile(''); setQuery(''); setMatches([]);
+      setRoot(selected); setFiles({}); setActiveFile(''); setProblemsByFile({}); setQuery(''); setMatches([]);
       setRecoveryLocked(false); setRecoveryBlocked(''); setRecoveryWarning(''); setRecoveryError('');
       setModel(Model.fromJson(initialLayout())); setRefresh(value => value + 1);
     } catch (error) { notify(`Could not open project: ${String(error)}`); }
@@ -338,6 +433,10 @@ export default function App() {
         event.preventDefault(); setSearchMode('contents'); model.doAction(Actions.selectTab('search'));
         setTimeout(() => document.getElementById('content-search')?.focus(), 0);
       }
+      if (event.shiftKey && event.key.toLowerCase() === 'm') {
+        event.preventDefault();
+        showProblems();
+      }
       if (event.key === '`') { event.preventDefault(); addTerminal(); }
     };
     window.addEventListener('keydown', handle);
@@ -369,7 +468,11 @@ export default function App() {
 
   const factory = (node: TabNode): ReactNode => {
     switch (node.getComponent()) {
-      case 'explorer': return <Explorer root={root} blocked={!!recoveryBlocked} refresh={refresh} reveal={reveal} onRefresh={() => setRefresh(value => value + 1)} onOpen={path => void openFile(path)} onFolder={() => void openFolder()} onOperation={operation => { setFileOperation(operation); setFileError(''); }} />;
+      case 'explorer': return <Explorer root={root} blocked={!!recoveryBlocked} refresh={refresh} reveal={reveal} onRefresh={() => setRefresh(value => value + 1)} onOpen={path => void openFile(path)} onFolder={() => void openFolder()} onOperation={(operation, returnFocus) => {
+        fileOperationFocus.current = returnFocus ?? null;
+        setFileOperation(operation);
+        setFileError('');
+      }} />;
       case 'search': return <div className="search-panel panel-scroll"><div className="panel-heading">SEARCH</div>
         <div className="search-modes" role="tablist" aria-label="Search mode"><button role="tab" aria-selected={searchMode === 'files'} onClick={() => setSearchMode('files')}>Files</button><button role="tab" aria-selected={searchMode === 'contents'} onClick={() => setSearchMode('contents')}>Contents</button></div>
         {searchMode === 'contents' ? <ContentSearch root={root} blocked={!!recoveryBlocked || (native && !root)} refresh={refresh} onOpen={match => { void openFile(match.path).then(() => setJump({ ...match, token: crypto.randomUUID() })); }} /> : <>
@@ -380,8 +483,20 @@ export default function App() {
       </>}</div>;
       case 'file': {
         const file = files[node.getConfig().path];
-        return file ? <Suspense fallback={<p className="panel-description">Loading editor…</p>}><Editor file={file} jump={jump?.path === file.path ? jump : null} onJumpError={() => notify('This search result no longer matches the open file. Save or reopen the file, then search again.')} onChange={(path, content) => setFiles(previous => ({ ...previous, [path]: { ...previous[path], content } }))} onSave={path => void saveFile(path)} onCursor={(line, col) => setPosition({ line, col })} /></Suspense> : null;
+        if (!file) return null;
+        const feature = languageFeature(languageId(file.path));
+        return <Suspense fallback={<p className="panel-description">Loading editor…</p>}><Editor file={file} jump={jump?.path === file.path ? jump : null}
+          active={activeFile === file.path} languageWorkspace={languageWorkspace}
+          lspEnabled={!!feature && languageOptions[feature]}
+          lintEnabled={languageOptions.eslint && (feature === 'typescript' || feature === 'javascript')}
+          onProblems={reportProblems} onDefinition={goToDefinition} onLanguageError={notify}
+          onJumpError={() => notify('This search result no longer matches the open file. Save or reopen the file, then search again.')}
+          onChange={(path, content) => setFiles(previous => ({ ...previous, [path]: { ...previous[path], content } }))}
+          onSave={path => void saveFile(path)} onCursor={(line, col) => setPosition({ line, col })} /></Suspense>;
       }
+      case 'problems': return <Problems key={problemsFile} file={problemsFile} problems={problems} onCopyStatus={notify} onOpen={problem => {
+        void openLocation(problem.path, problem.line, problem.column);
+      }} />;
       case 'terminal': return <Suspense fallback={null}><Terminal id={node.getId()} shellId={node.getConfig()?.shellId} /></Suspense>;
       default: return <div className="welcome panel-scroll"><div className="welcome-content">
         <div className="brand-mark"><Code2 size={36} strokeWidth={1.4} /></div>
@@ -395,10 +510,20 @@ export default function App() {
     }
   };
 
-  return <div className="app-shell">
-    <header className="titlebar"><div className="app-name"><Code2 size={18} /><strong>leve</strong><span className="preview-tag">preview</span></div>
-      <button ref={projectPicker} className="project-picker" title={root || 'Switch project'} aria-haspopup="menu" aria-expanded={projectMenu} aria-controls={projectMenu ? 'project-menu' : undefined} disabled={switchingProject} onClick={() => setProjectMenu(value => !value)}><Folder size={13} /><span>{root ? fileName(root) : 'No folder open'}</span><ChevronDown size={12} /></button>
-      <button className="icon-button" title="Layout and shortcuts" onClick={() => setSettings(true)}><Settings2 size={16} /></button>
+  const navigationSelected = (id: string) => {
+    const tab = model.getNodeById(id);
+    const parent = tab?.getParent();
+    return (parent instanceof TabSetNode || parent instanceof BorderNode) && parent.getSelectedNode() === tab;
+  };
+
+  return <div className="app-shell" onContextMenuCapture={event => event.preventDefault()}>
+    <header className={native ? 'titlebar desktop-titlebar' : 'titlebar'} data-tauri-drag-region={native ? '' : undefined}>
+      <div className="app-name"><Code2 size={18} /><strong>leve</strong><span className="preview-tag">preview</span></div>
+      <button ref={projectPicker} className="project-picker" data-tauri-drag-region="false" title={root || 'Switch project'} aria-haspopup="menu" aria-expanded={projectMenu} aria-controls={projectMenu ? 'project-menu' : undefined} disabled={switchingProject} onClick={() => setProjectMenu(value => !value)}><Folder size={13} /><span>{root ? fileName(root) : 'No folder open'}</span><ChevronDown size={12} /></button>
+      <div className="titlebar-actions" data-tauri-drag-region="false">
+        <button className="icon-button" title="Layout and shortcuts" onClick={() => setSettings(true)}><Settings2 size={16} /></button>
+        {native && <WindowControls report={notify} />}
+      </div>
     </header>
     {(recoveryBlocked || recoveryWarning || recoveryError) && <div className="recovery-banner" role="alert"><span>{recoveryBlocked || recoveryError || recoveryWarning}</span>
       {recoveryBlocked && <button className="button" onClick={() => { void checkpoint().then(saved => { if (saved) void recoverSession(); }); }}>Retry recovery</button>}
@@ -410,13 +535,21 @@ export default function App() {
       {!recoveryBlocked && !recoveryError && <button className="icon-button" aria-label="Dismiss recovery warning" onClick={() => setRecoveryWarning('')}><X size={15} /></button>}
     </div>}
     <div className="workspace"><aside className="activity-bar" aria-label="Navigation">
-      <button title="Explorer" className="activity-button" onClick={() => model.doAction(Actions.selectTab('explorer'))}><Files size={21} /></button>
-      <button title="Find files (Ctrl+P)" className="activity-button" onClick={() => { model.doAction(Actions.selectTab('search')); setTimeout(() => document.getElementById('file-search')?.focus(), 0); }}><Search size={21} /></button>
+      <button title="Explorer" className="activity-button" aria-pressed={navigationSelected('explorer')} onClick={() => model.doAction(Actions.selectTab('explorer'))}><Files size={19} /></button>
+      <button title="Find files (Ctrl+P)" className="activity-button" aria-pressed={navigationSelected('search')} onClick={() => { model.doAction(Actions.selectTab('search')); setTimeout(() => document.getElementById('file-search')?.focus(), 0); }}><Search size={19} /></button>
       <button title="New terminal" className="activity-button" onClick={openTerminalMenu}><TerminalSquare size={21} /></button>
       <div className="activity-spacer" /><button title="Settings" className="activity-button" onClick={() => setSettings(true)}><Settings2 size={21} /></button>
     </aside><main className="layout-host"><Layout model={model} factory={factory} onAction={onAction}
-      onModelChange={current => { persist(current); setLayoutVersion(value => value + 1); const active = current.getActiveTabset()?.getSelectedNode(); if (active instanceof TabNode && active.getComponent() === 'file') setActiveFile(active.getConfig().path); }}
+      onModelChange={current => {
+        persist(current);
+        setLayoutVersion(value => value + 1);
+        setActiveFile(previous => selectedFile(current, previous));
+      }}
       onRenderTab={(node, values) => {
+        if (node.getComponent() === 'problems') {
+          values.content = <span className="problems-tab-label">Problems <span className="problems-count">{problems.length}</span></span>;
+          return;
+        }
         const path = node.getConfig()?.path;
         const dirty = path && files[path]?.content !== files[path]?.saved;
         if (dirty) values.content = <span>{node.getName()}<span className="dirty-dot" title="Unsaved changes">●</span></span>;
@@ -426,7 +559,12 @@ export default function App() {
     <footer className="statusbar"><span className="status-indicator" />{native ? 'Local' : 'Web preview'}<span className="status-divider" /><span>{root ? fileName(root) : 'Demo project'}</span><div className="status-spacer" /><span title={checkpointTime ? `Last recovery checkpoint: ${checkpointTime}` : 'Preparing recovery'}>{recoveryError || recoveryLocked ? 'Recovery unavailable' : checkpointTime ? 'Recovery saved' : 'Recovery pending'}</span><span>Ln {position.line}, Col {position.col}</span><span>UTF-8</span><span>{activeFile ? languageName(activeFile) : 'Leve'}</span></footer>
     {(!sessionReady || closing) && <div className="session-loading" role="status">{closing ? 'Saving session…' : 'Restoring session…'}</div>}
     {notice && <div className="toast" role="status"><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={15} /></button></div>}
-    {fileOperation && <FileDialog key={JSON.stringify(fileOperation)} operation={fileOperation} dirtyCount={'entry' in fileOperation ? Object.values(files).filter(file => withinEntry(file.path, fileOperation.entry.path) && file.content !== file.saved).length : 0} busy={fileBusy} error={fileError} onCancel={() => { if (!fileBusy) setFileOperation(null); }} onSubmit={name => void applyFileOperation(name)} />}
+    {fileOperation && <FileDialog key={JSON.stringify(fileOperation)} operation={fileOperation} dirtyCount={'entry' in fileOperation ? Object.values(files).filter(file => withinEntry(file.path, fileOperation.entry.path) && file.content !== file.saved).length : 0} busy={fileBusy} error={fileError} onCancel={() => {
+      if (fileBusy) return;
+      setFileOperation(null);
+      const returnFocus = fileOperationFocus.current;
+      requestAnimationFrame(() => returnFocus?.focus());
+    }} onSubmit={name => void applyFileOperation(name)} />}
     {projectMenu && <div className="project-menu-backdrop" onClick={() => { setProjectMenu(false); projectPicker.current?.focus(); }}>
       <div id="project-menu" className="project-menu" role="menu" aria-label="Recent projects" onClick={event => event.stopPropagation()} onKeyDown={event => {
         const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'));
@@ -453,6 +591,16 @@ export default function App() {
     </div>}
     {settings && <div className="modal-backdrop" onClick={() => setSettings(false)}><section className="settings-modal" role="dialog" aria-modal="true" aria-label="Layout and shortcuts" onClick={event => event.stopPropagation()}>
       <div className="modal-heading"><h2>Your workspace</h2><button className="icon-button" aria-label="Close settings" onClick={() => setSettings(false)}><X size={18} /></button></div>
+      <fieldset className="language-settings">
+        <legend>Language support</legend>
+        <div className="language-options">{featureKeys.map(feature => <label key={feature}>
+          <input type="checkbox" checked={languageOptions[feature]} disabled={!languageWorkspace} onChange={event => toggleLanguageSupport(feature, event.target.checked)} />
+          {languageFeatures[feature]}
+        </label>)}</div>
+        <p>Options apply to the open project. ESLint uses the project's installation and checks the active JavaScript or TypeScript file as you edit.</p>
+        <p>Enable only for projects you trust. Analysis tools can run project configuration and plugins.</p>
+        <p><kbd>Ctrl+Space</kbd> Complete <kbd>F12</kbd> Go to Definition <kbd>Ctrl+Shift+M</kbd> Diagnostics</p>
+      </fieldset>
       <fieldset className="theme-picker"><legend>Appearance</legend><div className="theme-options">
         <label className={theme === 'dark' ? 'theme-option selected' : 'theme-option'}><input type="radio" name="theme" value="dark" checked={theme === 'dark'} onChange={() => setTheme('dark')} /><span>Dark</span></label>
         <label className={theme === 'light' ? 'theme-option selected' : 'theme-option'}><input type="radio" name="theme" value="light" checked={theme === 'light'} onChange={() => setTheme('light')} /><span>Light</span></label>

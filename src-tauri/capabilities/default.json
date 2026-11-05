@@ -3,5 +3,14 @@
   "identifier": "main-window",
   "description": "Local capabilities for the main editor window",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-destroy", "dialog:allow-open", "dialog:allow-message"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-destroy",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-start-dragging",
+    "dialog:allow-open",
+    "dialog:allow-message"
+  ]
 }

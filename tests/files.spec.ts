@@ -14,6 +14,65 @@ async function create(page: Page, kind: 'file' | 'folder', name: string) {
 
 test.afterEach(async ({ page }) => { await page.close({ runBeforeUnload: false }); });
 
+test('explorer keyboard shortcuts confirm deletion, rename entries and create in a folder', async ({ page }) => {
+  await page.goto('/');
+  const file = page.getByRole('button', { name: 'main.py', exact: true });
+  await file.click();
+  await page.keyboard.press('Delete');
+  const deletion = page.getByRole('dialog', { name: 'Delete permanently' });
+  await expect(deletion).toContainText('src/main.py');
+  await expect(deletion.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(file).toBeFocused();
+  await page.keyboard.press('F2');
+  const rename = page.getByRole('dialog', { name: 'Rename' });
+  await expect(rename.getByRole('textbox', { name: 'Name' })).toHaveValue('main.py');
+  await page.keyboard.press('Escape');
+  await expect(file).toBeFocused();
+  await page.keyboard.press('ArrowLeft');
+  const folder = page.getByRole('button', { name: 'src', exact: true });
+  await expect(folder).toBeFocused();
+  await page.keyboard.press('Shift+F10');
+  await expect(page.getByRole('menuitem', { name: 'New file…' })).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  const creation = page.getByRole('dialog', { name: 'New folder' });
+  await expect(creation).toContainText('src');
+  await creation.getByRole('textbox', { name: 'Name' }).fill('keyboard-folder');
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('button', { name: 'Actions for src/keyboard-folder' })).toBeVisible();
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('Delete');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+});
+
+test('right-click switches explorer menus and suppresses the browser menu throughout Leve', async ({ page }) => {
+  await page.goto('/');
+  const file = page.getByRole('button', { name: 'main.py', exact: true });
+  const rootSpace = page.locator('.explorer-root-space');
+  await expect(page.getByRole('button', { name: 'Open another folder', exact: true })).toHaveCount(0);
+  await file.click({ button: 'right' });
+  await expect(page.getByRole('menu', { name: 'Actions for main.py' })).toBeVisible();
+  await rootSpace.click({ button: 'right' });
+  const rootMenu = page.getByRole('menu', { name: 'Project root actions' });
+  await expect(rootMenu.getByRole('menuitem')).toHaveText(['New file…', 'New folder…']);
+  const defaultPrevented = await page.locator('.statusbar').evaluate(element =>
+    !element.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })),
+  );
+  expect(defaultPrevented).toBe(true);
+  await page.locator('.statusbar').click({ button: 'right' });
+  await expect(rootMenu).toHaveCount(0);
+  for (const [kind, name] of [['file', 'root-note.txt'], ['folder', 'root-folder']]) {
+    await rootSpace.click({ button: 'right' });
+    await rootMenu.getByRole('menuitem', { name: `New ${kind}…` }).click();
+    const dialog = page.getByRole('dialog', { name: `New ${kind}` });
+    await expect(dialog).toContainText('Project root');
+    await dialog.getByRole('textbox', { name: 'Name' }).fill(name);
+    await dialog.getByRole('button', { name: 'Create' }).click();
+    await expect(page.locator('.explorer').getByRole('button', { name, exact: true })).toBeVisible();
+  }
+});
+
 test('creates files and folders, including a file inside an empty folder', async ({ page }) => {
   await page.goto('/');
   await create(page, 'folder', 'my-folder');

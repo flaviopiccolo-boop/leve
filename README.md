@@ -65,6 +65,24 @@ Press **Ctrl+Shift+F**, or choose **Search → Contents**, to search saved proje
 
 Native content searches run on a background worker and cancel when the query changes or the panel closes. Limits are 500 results, 5,000 files, 20,000 visited entries, 64 MB read, five seconds, 15 directory levels, and 1 MB per file. Reaching a budget produces an explicit partial-results notice. Binary, non-UTF-8, inaccessible, and linked entries are skipped. Common dependency and build folders are excluded (`.git`, `node_modules`, `target`, `.venv`, `venv`, `__pycache__`, `dist`, `build`, `.next`, `.idea`); `.gitignore` rules are not parsed. Searches use literal text of 1–256 characters on a single line. Save edits before searching. The browser demo supports file management and search in memory; these filesystem changes reset on reload.
 
+## Language support
+
+The Windows app supports autocomplete, live diagnostics, and go to definition for Python, TypeScript, and JavaScript. Install Node.js 24 or Node.js 22.22.2 or newer in the 22.x series, then install the servers from PowerShell.
+
+```powershell
+npm install -g pyright typescript@6 typescript-language-server
+```
+
+Restart Leve so it can see Node.js and the npm command directory on PATH. Open a project folder and enable the tools you want under **Settings → Language support**. Python, TypeScript, JavaScript, and ESLint have separate switches saved per project. Enable analysis for projects you trust, since project configuration and plugins can execute code. Missing tools are reported in the app. After installing a language server, reopen Leve or toggle its language off and on to retry.
+
+- **Python and Django.** Pyright reads `pyrightconfig.json` or `[tool.pyright]` in `pyproject.toml`. Leve detects `.venv` or `venv` at the project root. Install Django and the project's dependencies in that environment, or configure another environment in Pyright.
+- **TypeScript and JavaScript.** One TypeScript Language Server handles both languages, including TSX and JSX. It uses the project's `tsconfig.json` or `jsconfig.json`. Use `checkJs` or `// @ts-check` for JavaScript type errors.
+- **ESLint.** Install ESLint and its plugins or TypeScript parser in the project and configure its rules. Leve uses the nearest project ESLint installation to check the active JavaScript or TypeScript file, including unsaved text. Analysis starts after a 750 ms pause and checks one file at a time per project.
+
+Press **Ctrl+Space** for completion or **F12** to open a definition inside the workspace. The **Problems** tab next to the terminal shows the active file's diagnostics and their count. Click a result to jump to the line, expand it to view the details, or copy one result or the whole file group as JSON. Press **Ctrl+Shift+M** to reveal the panel. The language servers start when a supported document opens and stop when their languages are disabled or the workspace changes. Browser preview supports editing without the native analysis processes.
+
+The desktop title bar is part of Leve's interface and follows its theme. Drag the empty area to move the window or double-click it to maximize or restore. Closing from the title bar uses the session recovery flow.
+
 ## Session recovery
 
 The desktop app checkpoints the current session to its local application data directory, under `recovery/session.json`, roughly every 400 ms while state changes. A normal window close waits for the latest checkpoint. Files in the project are written only when you explicitly save them.
@@ -79,7 +97,7 @@ The status bar shows **Recovery pending**, **Recovery saved**, or **Recovery una
 
 - Automated tests cover the web interface and backend operations. Rust tests include a real PowerShell/ConPTY session with UTF-8 output and a batch file running in a folder with spaces and non-ASCII characters. The complete desktop UI flow still requires manual validation.
 - UTF-8 text files up to 4 MB. Editing may normalize line endings to LF. Binary files are rejected.
-- No Git integration, LSP, debugging, project-aware autocomplete, extensions, or automatic updates. See the roadmap for the Python LSP integration assessment.
+- No Git integration, debugging, extensions, or automatic updates. Go to Definition is limited to files inside the open workspace.
 - Project content search covers saved files with the documented exclusions and limits. Use Ctrl+F to search the active buffer, including unsaved edits.
 - No automatic filesystem watching. Refresh the tree manually. A save conflict requires copying your changes and reopening the file.
 - Recovery restores the most recent completed checkpoint; it is not a substitute for saving project files or version control.

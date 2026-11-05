@@ -86,7 +86,7 @@ export async function mutateEntry(operation: FileOperation, name: string, expect
 }
 export function languageName(path: string) {
   const ext = path.split('.').pop()?.toLowerCase();
-  return ({ py: 'Python', ts: 'TypeScript', tsx: 'TSX', js: 'JavaScript', jsx: 'JSX', json: 'JSON', md: 'Markdown', css: 'CSS', html: 'HTML' } as Record<string, string>)[ext || ''] || 'Plain text';
+  return ({ py: 'Python', pyi: 'Python', ts: 'TypeScript', mts: 'TypeScript', cts: 'TypeScript', tsx: 'TSX', js: 'JavaScript', mjs: 'JavaScript', cjs: 'JavaScript', jsx: 'JSX', json: 'JSON', md: 'Markdown', css: 'CSS', html: 'HTML' } as Record<string, string>)[ext || ''] || 'Plain text';
 }
 export async function indexFiles(path = '', depth = 0): Promise<FileEntry[]> {
   if (depth > 15) return [];

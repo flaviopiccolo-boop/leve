@@ -4,6 +4,7 @@ mod shells;
 mod session;
 mod files;
 mod search;
+mod language;
 
 use portable_pty::{native_pty_system, Child, MasterPty, PtySize};
 #[cfg(test)]
@@ -29,6 +30,7 @@ impl Drop for TerminalSession {
 
 #[derive(Default)]
 struct Workspace {
+    language: language::LanguageTools,
     search: search::SearchState,
     operations: Mutex<()>,
     root: Mutex<Option<PathBuf>>,
@@ -74,6 +76,7 @@ async fn set_workspace(path: String, state: State<'_, Workspace>) -> Result<Stri
     let root = PathBuf::from(path).canonicalize().map_err(error)?;
     if !root.is_dir() { return Err("Select a folder.".into()); }
     state.search.cancel(None);
+    state.language.clear()?;
     state.terminals.lock().map_err(error)?.clear();
     let label = dunce::simplified(&root).to_string_lossy().to_string();
     *state.root.lock().map_err(error)? = Some(root);
@@ -181,11 +184,12 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Workspace::default())
         .manage(session::SessionStore::default())
-        .invoke_handler(tauri::generate_handler![set_workspace, list_directory, read_file, write_file, files::create_entry, files::rename_entry, files::delete_entry, search::search_content, search::cancel_search, shells::list_shells, terminal_start, terminal_write, terminal_resize, terminal_close, session::session_load, session::session_save])
+        .invoke_handler(tauri::generate_handler![set_workspace, list_directory, read_file, write_file, files::create_entry, files::rename_entry, files::delete_entry, search::search_content, search::cancel_search, shells::list_shells, terminal_start, terminal_write, terminal_resize, terminal_close, session::session_load, session::session_save, language::lsp_start, language::lsp_send, language::lsp_stop, language::lsp_document, language::lsp_resolve, language::eslint_check])
         .build(tauri::generate_context!())
         .expect("Could not start Leve")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
+                let _ = app.state::<Workspace>().language.clear();
                 if let Ok(mut sessions) = app.state::<Workspace>().terminals.lock() { sessions.clear(); }
             }
         });
