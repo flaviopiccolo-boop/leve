@@ -2,8 +2,14 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 
 export interface FileEntry { name: string; path: string; directory: boolean }
-export interface OpenFile { path: string; name: string; content: string; saved: string }
+export interface OpenFile { path: string; name: string; content: string; saved: string; image?: true }
 export const native = isTauri();
+const imageTypes = new Map([
+  ['png', 'image/png'], ['jpg', 'image/jpeg'], ['jpeg', 'image/jpeg'], ['webp', 'image/webp'],
+  ['gif', 'image/gif'], ['bmp', 'image/bmp'], ['ico', 'image/x-icon'], ['avif', 'image/avif'],
+]);
+const imageType = (path: string) => imageTypes.get(/\.([^.]+)$/.exec(fileName(path).toLowerCase())?.[1] ?? '');
+export const isImagePath = (path: string) => !!imageType(path);
 
 export const demoFiles: Record<string, string> = {
   'src/main.py': `from services.greeting import greet\n\n\ndef main():\n    message = greet("world")\n    print(message)\n\n\nif __name__ == "__main__":\n    main()\n`,
@@ -13,7 +19,10 @@ export const demoFiles: Record<string, string> = {
   'requirements.txt': '# Add project dependencies here.\n',
 };
 
-let demo = { ...demoFiles };
+const demo: Record<string, string | { imageUrl: string }> = {
+  ...demoFiles,
+  'leve.png': { imageUrl: new URL('../src-tauri/icons/256x256.png', import.meta.url).href },
+};
 const demoFolders = new Set(['src', 'src/services']);
 let workspaceSelected = false;
 export function sortEntries<T extends FileEntry>(entries: T[], foldersFirst = true) {
@@ -48,8 +57,22 @@ export async function listFiles(path = ''): Promise<FileEntry[]> {
 }
 export async function readFile(path: string): Promise<string> {
   if (native && workspaceSelected) return invoke<string>('read_file', { path });
-  if (!(path in demo)) throw new Error('File not found.');
-  return demo[path];
+  if (!Object.hasOwn(demo, path)) throw new Error('File not found.');
+  const content = demo[path];
+  if (typeof content !== 'string') throw new Error('Open this file with the image viewer.');
+  return content;
+}
+export async function readImage(path: string, root: string | null): Promise<Blob> {
+  if (native && root) {
+    const bytes = await invoke<ArrayBuffer | number[]>('read_image', { path, expectedRoot: root });
+    return new Blob([Array.isArray(bytes) ? new Uint8Array(bytes) : bytes], { type: imageType(path) });
+  }
+  if (!Object.hasOwn(demo, path)) throw new Error('File not found.');
+  const content = demo[path];
+  if (typeof content === 'string') throw new Error('The file is empty or is not an image.');
+  const response = await fetch(content.imageUrl);
+  if (!response.ok) throw new Error('The demo image could not be loaded.');
+  return response.blob();
 }
 export async function writeFile(file: OpenFile): Promise<void> {
   if (native && workspaceSelected) await invoke('write_file', { path: file.path, content: file.content, expected: file.saved });
@@ -108,6 +131,7 @@ export async function searchContent(query: string, caseSensitive: boolean, id: s
   const matcher = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), caseSensitive ? 'gu' : 'giu');
   for (const [path, content] of Object.entries(demo)) {
     if (path.split('/').some(part => ['.git', 'node_modules', 'target', '.venv', 'venv', '__pycache__', 'dist', 'build', '.next', '.idea'].includes(part.toLowerCase()))) continue;
+    if (typeof content !== 'string') { result.skipped += 1; continue; }
     result.scanned += 1;
     const lines = content.split(/\r?\n/);
     for (const [index, line] of lines.entries()) for (const found of line.matchAll(matcher)) {

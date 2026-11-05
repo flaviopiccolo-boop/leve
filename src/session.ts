@@ -18,7 +18,8 @@ export async function loadSession(): Promise<Session | null> {
   if (!data) return null;
   if (data.version !== 1 || !Array.isArray(data.files) || data.files.length > 100 ||
       !(data.root === null || typeof data.root === 'string') || typeof data.activeFile !== 'string' || !data.layout ||
-      data.files.some((file: OpenFile) => !file || typeof file.path !== 'string' || typeof file.name !== 'string' || typeof file.content !== 'string' || typeof file.saved !== 'string')) {
+      data.files.some((file: OpenFile) => !file || typeof file.path !== 'string' || typeof file.name !== 'string' || typeof file.content !== 'string' || typeof file.saved !== 'string' ||
+        (file.image !== undefined && (file.image !== true || file.content !== '' || file.saved !== '')))) {
     throw new Error('Invalid recovery data. The existing snapshot has been preserved.');
   }
   return data;
@@ -39,7 +40,10 @@ export async function restoreFiles(savedFiles: OpenFile[]): Promise<{ files: Rec
   const warnings: string[] = [];
   let recovered = 0;
   for (const file of savedFiles) {
-    if (file.content !== file.saved) {
+    if (file.image) {
+      // The viewer reloads from disk when its tab is shown.
+      files[file.path] = file;
+    } else if (file.content !== file.saved) {
       files[file.path] = file;
       recovered += 1;
       try {

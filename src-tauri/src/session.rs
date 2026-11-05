@@ -13,6 +13,8 @@ pub struct RecoveryFile {
     name: String,
     content: String,
     saved: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    image: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -30,6 +32,9 @@ fn validate(session: &Session) -> Result<(), String> {
     if session.files.len() > 100 { return Err("Recovery supports up to 100 open files.".into()); }
     if session.files.iter().any(|file| file.path.is_empty() || file.content.len() > 4 * 1024 * 1024 || file.saved.len() > 4 * 1024 * 1024) {
         return Err("A recovery file exceeds the 4 MB limit.".into());
+    }
+    if session.files.iter().any(|file| file.image && (!file.content.is_empty() || !file.saved.is_empty())) {
+        return Err("Image previews cannot contain recovery text.".into());
     }
     Ok(())
 }
@@ -92,7 +97,7 @@ mod tests {
     use super::*;
 
     fn snapshot(content: &str) -> Session {
-        Session { version: 1, root: Some("C:\\project".into()), files: vec![RecoveryFile { path: "main.py".into(), name: "main.py".into(), content: content.into(), saved: "on disk".into() }], active_file: "main.py".into(), layout: serde_json::json!({}) }
+        Session { version: 1, root: Some("C:\\project".into()), files: vec![RecoveryFile { path: "main.py".into(), name: "main.py".into(), content: content.into(), saved: "on disk".into(), image: false }], active_file: "main.py".into(), layout: serde_json::json!({}) }
     }
 
     #[test]

@@ -9,6 +9,7 @@ import { version } from '../package.json';
 import Explorer, { FileDialog } from './Explorer';
 import { loadExplorerPreferences, saveExplorerPreferences } from './explorerPreferences';
 import ContentSearch from './ContentSearch';
+import ImagePreview from './ImagePreview';
 import { gitDecorations, GitDiff, GitPanel, useGitStatus, type GitChange } from './Git';
 import WindowControls from './WindowControls';
 import Problems from './Problems';
@@ -16,7 +17,7 @@ import SettingsDialog from './SettingsDialog';
 import { dockPanel, documentTabset, getTab, hiddenPanelsBorder, hidePanels, isPanelShown, navigationPanelIds, panelIds, panelTabs, restorePanelSizes, revealTab, tabsetOf, terminalTabs, terminalTabset, type PanelId } from './dockPanels';
 import { LanguageWorkspace, languageFeature, languageFeatures, languageId, type Definition, type LanguageFeature, type LanguageOptions, type Problem } from './language';
 import type { EditorJump } from './Editor';
-import { activateWorkspace, fileName, indexFiles, languageName, mutateEntry, native, pickWorkspace, readFile, withinEntry, writeFile, type FileEntry, type FileOperation, type OpenFile } from './workspace';
+import { activateWorkspace, fileName, indexFiles, isImagePath, languageName, mutateEntry, native, pickWorkspace, readFile, withinEntry, writeFile, type FileEntry, type FileOperation, type OpenFile } from './workspace';
 
 const LAYOUT_KEY = 'leve.layout.v1';
 const LANGUAGE_KEY = 'leve.language-projects.v1';
@@ -146,6 +147,7 @@ export default function App() {
   const [jump, setJump] = useState<EditorJump | null>(null);
   const [position, setPosition] = useState({ line: 1, col: 1 });
   const [activeFile, setActiveFile] = useState('');
+  const activeImage = Object.hasOwn(files, activeFile) && files[activeFile].image === true;
   const [sessionReady, setSessionReady] = useState(false);
   const [recoveryBlocked, setRecoveryBlocked] = useState('');
   const [recoveryWarning, setRecoveryWarning] = useState('');
@@ -201,7 +203,7 @@ export default function App() {
       return next;
     });
   }, []);
-  const problemsFile = activeFile && Object.hasOwn(files, activeFile) ? activeFile : '';
+  const problemsFile = !activeImage && Object.hasOwn(files, activeFile) ? activeFile : '';
   const problems = useMemo(() => (problemsByFile[problemsFile] ?? [])
     .filter(problem => {
       if (problem.source === 'ESLint') return languageOptions.eslint;
@@ -286,12 +288,15 @@ export default function App() {
     opening.current.add(path);
     const currentGeneration = generation.current;
     try {
-      const content = await readFile(path);
+      const name = fileName(path);
+      const image = isImagePath(path);
+      const content = image ? '' : await readFile(path);
       if (generation.current !== currentGeneration) return;
-      setFiles(previous => ({ ...previous, [path]: { path, name: fileName(path), content, saved: content } }));
+      const file: OpenFile = { path, name, content, saved: content, ...(image ? { image: true } : {}) };
+      setFiles(previous => ({ ...previous, [path]: file }));
       const target = documentTabset(model);
       if (target) {
-        model.doAction(Actions.addNode({ type: 'tab', id, name: fileName(path), component: 'file', config: { path } }, target.getId(), DockLocation.CENTER, -1));
+        model.doAction(Actions.addNode({ type: 'tab', id, name, component: 'file', config: { path } }, target.getId(), DockLocation.CENTER, -1));
         const opened = getTab(model, id);
         if (opened && !isPanelShown(model, opened)) revealTab(model, opened);
       }
@@ -318,7 +323,7 @@ export default function App() {
     if (fileBusyRef.current) return;
     if (recoveryBlocked) { notify('Reopen the original project before saving recovered changes to disk.'); return; }
     const file = filesRef.current[path];
-    if (!file || file.content === file.saved || saving.current.has(path)) return;
+    if (!file || file.image || file.content === file.saved || saving.current.has(path)) return;
     saving.current.add(path);
     const currentGeneration = generation.current;
     try {
@@ -458,7 +463,7 @@ export default function App() {
       if (settings) return;
       if (event.key === 'Escape') { setTerminalMenu(null); setProjectMenu(false); if (projectMenu) projectPicker.current?.focus(); }
       if (!(event.ctrlKey || event.metaKey)) return;
-      if (event.key.toLowerCase() === 's') { event.preventDefault(); if (activeFile) void saveFile(activeFile); }
+      if (event.key.toLowerCase() === 's') { event.preventDefault(); if (activeFile && !activeImage) void saveFile(activeFile); }
       if (event.key.toLowerCase() === 'p') {
         setSearchMode('files');
         event.preventDefault(); showPanel('search');
@@ -543,6 +548,9 @@ export default function App() {
       case 'file': {
         const file = files[node.getConfig().path];
         if (!file) return null;
+        if (file.image) return recoveryBlocked
+          ? <p className="panel-description">Reopen the project to preview this image.</p>
+          : <ImagePreview key={file.path} path={file.path} name={file.name} root={root} />;
         const feature = languageFeature(languageId(file.path));
         return <Suspense fallback={<p className="panel-description">Loading editor…</p>}><Editor file={file} jump={jump?.path === file.path ? jump : null}
           active={activeFile === file.path} languageWorkspace={languageWorkspace}
@@ -701,7 +709,7 @@ export default function App() {
         { key: 'open', label: 'Open folder…', icon: <FolderOpen size={14} />, onSelect: () => void openFolder() },
         { key: 'recent', label: 'Recent projects…', icon: <Folder size={14} />, onSelect: () => requestAnimationFrame(() => setProjectMenu(true)) },
         { type: 'divider', key: 'files' },
-        { key: 'save', label: 'Save file', disabled: !activeFile, onSelect: () => void saveFile(activeFile) },
+        { key: 'save', label: 'Save file', disabled: !activeFile || activeImage, onSelect: () => void saveFile(activeFile) },
       ] : [
         { key: 'restore', label: 'Restore workspace', icon: <LayoutTemplate size={14} />, onSelect: restoreWorkspace },
         { type: 'divider', key: 'panels' },
@@ -712,7 +720,7 @@ export default function App() {
         { key: 'terminal', label: `${terminalShown ? 'Hide' : 'Show'} Terminal`, icon: <Check size={14} visibility={terminalShown ? 'visible' : 'hidden'} />, onSelect: () => toggleTerminal(titleMenu.origin) },
       ]}
     />}
-    <footer className="statusbar"><span className="status-indicator" />{native ? 'Local' : 'Web preview'}<span className="status-divider" /><span>{root ? fileName(root) : 'Demo project'}</span><div className="status-spacer" /><span title={checkpointTime ? `Last recovery checkpoint: ${checkpointTime}` : 'Preparing recovery'}>{recoveryError || recoveryLocked ? 'Recovery unavailable' : checkpointTime ? 'Recovery saved' : 'Recovery pending'}</span><span>Ln {position.line}, Col {position.col}</span><span>UTF-8</span><span>{activeFile ? languageName(activeFile) : 'Leve'}</span></footer>
+    <footer className="statusbar"><span className="status-indicator" />{native ? 'Local' : 'Web preview'}<span className="status-divider" /><span>{root ? fileName(root) : 'Demo project'}</span><div className="status-spacer" /><span title={checkpointTime ? `Last recovery checkpoint: ${checkpointTime}` : 'Preparing recovery'}>{recoveryError || recoveryLocked ? 'Recovery unavailable' : checkpointTime ? 'Recovery saved' : 'Recovery pending'}</span>{activeImage ? <span>Image · Read-only</span> : <><span>Ln {position.line}, Col {position.col}</span><span>UTF-8</span><span>{activeFile ? languageName(activeFile) : 'Leve'}</span></>}</footer>
     {(!sessionReady || closing) && <div className="session-loading" role="status">{closing ? 'Saving session…' : 'Restoring session…'}</div>}
     {notice && <div className="toast" role="status"><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={15} /></button></div>}
     {fileOperation && <FileDialog key={JSON.stringify(fileOperation)} operation={fileOperation} dirtyCount={'entry' in fileOperation ? Object.values(files).filter(file => withinEntry(file.path, fileOperation.entry.path) && file.content !== file.saved).length : 0} busy={fileBusy} error={fileError} onCancel={() => {

@@ -12,7 +12,7 @@
   "app": {
     "windows": [{ "label": "main", "title": "Leve — Editor", "width": 1400, "height": 900, "minWidth": 800, "minHeight": 550, "decorations": false, "devtools": false, "dragDropEnabled": false }],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
   "bundle": { "active": true, "targets": ["nsis"], "icon": ["icons/256x256.png", "icons/icon.ico"] }
