@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type
 import { Actions, BorderNode, DockLocation, Layout, Model, PopupMenu, TabNode, TabSetNode, type Action, type IJsonModel } from 'flexlayout-react';
 import { Blocks, Check, ChevronDown, Code2, FileCode2, Files, Folder, FolderOpen, GitBranch, LayoutTemplate, PanelLeft, PanelLeftClose, Plus, Search, Settings2, TerminalSquare, X } from 'lucide-react';
 import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
+import { invoke } from '@tauri-apps/api/core';
 import { loadShells, previewShells, type ShellProfile } from './shells';
 import { loadSession, restoreFiles, saveSession, type Session } from './session';
 import { loadProjects, rememberProject, sameProject } from './projects';
@@ -10,7 +11,7 @@ import Explorer, { FileDialog } from './Explorer';
 import { loadExplorerPreferences, saveExplorerPreferences } from './explorerPreferences';
 import ContentSearch from './ContentSearch';
 import ImagePreview from './ImagePreview';
-import { gitDecorations, GitDiff, GitPanel, useGitStatus, type GitChange } from './Git';
+import { gitDecorations, GitCommitView, GitDiff, GitPanel, useGitStatus, type GitChange, type GitCommitSelection } from './Git';
 import WindowControls from './WindowControls';
 import Problems from './Problems';
 import SettingsDialog from './SettingsDialog';
@@ -127,6 +128,9 @@ export default function App() {
   const filesRef = useRef(files); filesRef.current = files;
   const [refresh, setRefresh] = useState(0);
   const [gitRevision, setGitRevision] = useState(0);
+  const [switchingBranch, setSwitchingBranch] = useState(false);
+  const branchBusy = useRef(false);
+  const [bufferVersions, setBufferVersions] = useState<Record<string, number>>({});
   const [notice, setNotice] = useState('');
   const [settings, setSettings] = useState(false);
   const [explorerPreferences, setExplorerPreferences] = useState(loadExplorerPreferences);
@@ -173,7 +177,7 @@ export default function App() {
     onRefresh: refreshGit,
   };
   const gitResult = useGitStatus(localRoot, gitProps.refresh);
-  const decorations = useMemo(() => gitDecorations(gitResult?.data), [gitResult?.data]);
+  const decorations = useMemo(() => gitDecorations(gitResult?.data?.flatMap(repo => repo.changes)), [gitResult?.data]);
   useEffect(() => {
     if (!localRoot) return;
     window.addEventListener('focus', refreshGit);
@@ -336,6 +340,60 @@ export default function App() {
     finally { saving.current.delete(path); }
   }, [notify, root, recoveryBlocked, refreshGit]);
 
+  const switchBranch = async (repo: string, branch: string) => {
+    if (!localRoot || switchingProject || closing || fileBusyRef.current || saving.current.size || opening.current.size) {
+      throw new Error('Wait for pending project or file operations to finish, then try again.');
+    }
+    if (Object.values(filesRef.current).some(file => file.content !== file.saved)) {
+      throw new Error('Save your open edits before switching branches.');
+    }
+    fileBusyRef.current = true;
+    branchBusy.current = true;
+    setSwitchingBranch(true);
+    try {
+      try {
+        await invoke('git_switch', { expectedRoot: localRoot, repo, branch });
+      } finally {
+        // A Git hook may fail after the working tree has already changed.
+        const affected = Object.values(filesRef.current).filter(file => !repo || withinEntry(file.path, repo));
+        const reloaded = await Promise.all(affected.map(async file => {
+          if (file.image) return { file, content: file.content };
+          try { return { file, content: await readFile(file.path) }; }
+          catch { return { file, content: null }; }
+        }));
+        const updated = { ...filesRef.current };
+        const remount: string[] = [];
+        const closed: string[] = [];
+        for (const { file, content } of reloaded) {
+          const current = Object.hasOwn(updated, file.path) ? updated[file.path] : undefined;
+          if (!current || current.content !== current.saved) continue;
+          if (content === null) {
+            delete updated[file.path];
+            closed.push(file.path);
+          } else if (file.image || content !== file.content) {
+            updated[file.path] = { ...current, content, saved: content };
+            remount.push(file.path);
+          }
+        }
+        filesRef.current = updated;
+        setFiles(updated);
+        setBufferVersions(previous => ({ ...previous, ...Object.fromEntries(remount.map(path => [path, (previous[path] ?? 0) + 1])) }));
+        for (const path of closed) {
+          const tab = fileTab(model, path);
+          if (tab) model.doAction(Actions.deleteTab(tab.getId()));
+        }
+        setJump(null);
+        setMatches([]);
+        setRefresh(value => value + 1);
+        if (closed.length) notify(`Closed ${closed.length} file tab(s) that could not be reopened after the Git operation.`);
+      }
+    } finally {
+      branchBusy.current = false;
+      fileBusyRef.current = false;
+      setSwitchingBranch(false);
+    }
+  };
+
   const applyFileOperation = async (name: string) => {
     if (!fileOperation || fileBusyRef.current) return;
     if (saving.current.size || opening.current.size) { setFileError('Wait for pending file operations to finish, then try again.'); return; }
@@ -391,6 +449,7 @@ export default function App() {
       remember(selected);
       generation.current += 1;
       setRoot(selected); setFiles({}); setActiveFile(''); setProblemsByFile({}); setQuery(''); setMatches([]);
+      setBufferVersions({});
       setRecoveryLocked(false); setRecoveryBlocked(''); setRecoveryWarning(''); setRecoveryError('');
       setModel(Model.fromJson(initialLayout())); setRefresh(value => value + 1);
     } catch (error) { notify(`Could not open project: ${String(error)}`); }
@@ -449,6 +508,7 @@ export default function App() {
     void import('@tauri-apps/api/window').then(async ({ getCurrentWindow }) => {
       const stop = await getCurrentWindow().onCloseRequested(async event => {
         event.preventDefault();
+        if (branchBusy.current) return;
         setClosing(true);
         if (await checkpoint() || await confirmDialog('Recovery could not be saved. Close anyway? Unsaved changes may be lost.', { title: 'Recovery unavailable', kind: 'warning' })) await getCurrentWindow().destroy();
         else setClosing(false);
@@ -460,7 +520,7 @@ export default function App() {
 
   useEffect(() => {
     const handle = (event: KeyboardEvent) => {
-      if (settings) return;
+      if (settings || branchBusy.current) return;
       if (event.key === 'Escape') { setTerminalMenu(null); setProjectMenu(false); if (projectMenu) projectPicker.current?.focus(); }
       if (!(event.ctrlKey || event.metaKey)) return;
       if (event.key.toLowerCase() === 's') { event.preventDefault(); if (activeFile && !activeImage) void saveFile(activeFile); }
@@ -484,6 +544,7 @@ export default function App() {
   });
 
   const onAction = (action: Action) => {
+    if (branchBusy.current) return undefined;
     if (action.type !== Actions.DELETE_TAB) return action;
     const tab = model.getNodeById(action.data.node);
     if (!(tab instanceof TabNode) || !tab.isCloseable()) return undefined;
@@ -511,14 +572,13 @@ export default function App() {
     if (action) model.doAction(action);
   };
 
-  const openGitDiff = (change: GitChange) => {
-    const name = `${fileName(change.path)} (Git diff)`;
+  const openGitView = (name: string, config: { change: GitChange } | { selection: GitCommitSelection }) => {
     if (getTab(model, 'git-diff')) {
-      model.doAction(Actions.updateNodeAttributes('git-diff', { name, config: { change } }));
+      model.doAction(Actions.updateNodeAttributes('git-diff', { name, config }));
     } else {
       const target = documentTabset(model);
       if (target) model.doAction(Actions.addNode({
-        type: 'tab', id: 'git-diff', component: 'git-diff', enableDrag: false, name, config: { change },
+        type: 'tab', id: 'git-diff', component: 'git-diff', enableDrag: false, name, config,
       }, target.getId(), DockLocation.CENTER, -1));
     }
     const tab = getTab(model, 'git-diff');
@@ -540,19 +600,25 @@ export default function App() {
         {matches.map(entry => <button className="search-result" key={entry.path} onClick={() => void openFile(entry.path)}><FileCode2 size={14} /><span>{entry.name}<small>{entry.path}</small></span></button>)}
         {query && <p className="panel-description">Up to 5,000 files · skips dependencies and build folders.</p>}
       </>}</div>;
-      case 'git': return <GitPanel root={localRoot} onRefresh={refreshGit} result={gitResult} onOpen={openGitDiff} />;
+      case 'git': return <GitPanel key={localRoot} {...gitProps} result={gitResult} onSwitch={switchBranch}
+        onOpen={change => openGitView(`${fileName(change.path)} (Git diff)`, { change })}
+        onCommit={selection => openGitView(`${selection.commit.id.slice(0, 7)} (Git commit)`, { selection })} />;
       case 'git-diff': {
-        const change: GitChange = node.getConfig().change;
-        return <GitDiff key={`${change.kind}:${change.path}`} {...gitProps} change={change} />;
+        const config = node.getConfig() as { change: GitChange } | { selection: GitCommitSelection };
+        if ('selection' in config) return <GitCommitView key={JSON.stringify([config.selection.repo, config.selection.commit.id])} {...gitProps} selection={config.selection} />;
+        const { change } = config;
+        const available = gitResult?.data?.some(repo => repo.changes.some(item => item.kind === change.kind && item.path === change.path));
+        return <GitDiff key={`${change.kind}:${change.path}`} {...gitProps} change={change} available={available} />;
       }
       case 'file': {
         const file = files[node.getConfig().path];
         if (!file) return null;
+        const bufferKey = `${file.path}:${bufferVersions[file.path] ?? 0}`;
         if (file.image) return recoveryBlocked
           ? <p className="panel-description">Reopen the project to preview this image.</p>
-          : <ImagePreview key={file.path} path={file.path} name={file.name} root={root} />;
+          : <ImagePreview key={bufferKey} path={file.path} name={file.name} root={root} />;
         const feature = languageFeature(languageId(file.path));
-        return <Suspense fallback={<p className="panel-description">Loading editor…</p>}><Editor file={file} jump={jump?.path === file.path ? jump : null}
+        return <Suspense fallback={<p className="panel-description">Loading editor…</p>}><Editor key={bufferKey} file={file} jump={jump?.path === file.path ? jump : null}
           active={activeFile === file.path} languageWorkspace={languageWorkspace}
           lspEnabled={!!feature && languageOptions[feature]}
           lintEnabled={languageOptions.eslint && (feature === 'typescript' || feature === 'javascript')}
@@ -625,7 +691,7 @@ export default function App() {
   const terminalShown = titleMenu?.name === 'View' && terminalTabs(model).some(tab => isPanelShown(model, tab));
 
   return <div ref={appShell} className="app-shell" onContextMenuCapture={event => event.preventDefault()}>
-    <header className={native ? 'titlebar desktop-titlebar' : 'titlebar'} data-tauri-drag-region={native ? '' : undefined}>
+    <header className={native ? 'titlebar desktop-titlebar' : 'titlebar'} inert={switchingBranch} data-tauri-drag-region={native ? '' : undefined}>
       <div className="titlebar-start" data-tauri-drag-region={native ? '' : undefined}>
         <div className="app-name"><Code2 size={18} /><strong>leve</strong><span className="preview-tag">{native ? `v${version}` : 'preview'}</span></div>
         <nav className="titlebar-menus" aria-label="Application menus" data-tauri-drag-region="false">
@@ -655,7 +721,7 @@ export default function App() {
       }}>Start a new session</button>}
       {!recoveryBlocked && !recoveryError && <button className="icon-button" aria-label="Dismiss recovery warning" onClick={() => setRecoveryWarning('')}><X size={15} /></button>}
     </div>}
-    <div className="workspace"><aside className="activity-bar" aria-label="Navigation">
+    <div className="workspace" inert={switchingBranch}><aside className="activity-bar" aria-label="Navigation">
       <button title="Explorer" className="activity-button" aria-pressed={navigationSelected('explorer')} onClick={() => showPanel('explorer')}><Files size={19} /></button>
       <button title="Find files (Ctrl+P)" className="activity-button" aria-pressed={navigationSelected('search')} onClick={() => { showPanel('search'); setTimeout(() => document.getElementById('file-search')?.focus(), 0); }}><Search size={19} /></button>
       <button title="Git changes" className="activity-button" aria-pressed={gitSelected} onClick={() => showPanel('git')}><GitBranch size={19} /></button>
@@ -721,7 +787,7 @@ export default function App() {
       ]}
     />}
     <footer className="statusbar"><span className="status-indicator" />{native ? 'Local' : 'Web preview'}<span className="status-divider" /><span>{root ? fileName(root) : 'Demo project'}</span><div className="status-spacer" /><span title={checkpointTime ? `Last recovery checkpoint: ${checkpointTime}` : 'Preparing recovery'}>{recoveryError || recoveryLocked ? 'Recovery unavailable' : checkpointTime ? 'Recovery saved' : 'Recovery pending'}</span>{activeImage ? <span>Image · Read-only</span> : <><span>Ln {position.line}, Col {position.col}</span><span>UTF-8</span><span>{activeFile ? languageName(activeFile) : 'Leve'}</span></>}</footer>
-    {(!sessionReady || closing) && <div className="session-loading" role="status">{closing ? 'Saving session…' : 'Restoring session…'}</div>}
+    {(!sessionReady || closing || switchingBranch) && <div className="session-loading" role="status">{switchingBranch ? 'Switching branch…' : closing ? 'Saving session…' : 'Restoring session…'}</div>}
     {notice && <div className="toast" role="status"><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={15} /></button></div>}
     {fileOperation && <FileDialog key={JSON.stringify(fileOperation)} operation={fileOperation} dirtyCount={'entry' in fileOperation ? Object.values(files).filter(file => withinEntry(file.path, fileOperation.entry.path) && file.content !== file.saved).length : 0} busy={fileBusy} error={fileError} onCancel={() => {
       if (fileBusy) return;
