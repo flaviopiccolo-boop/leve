@@ -305,7 +305,39 @@ button { border: 0; }
 .search-result:hover { background: var(--hover); }
 .search-result small { display: block; margin-top: 4px; color: var(--muted); overflow-wrap: anywhere; }
 .git-panel { background: var(--sidebar); }
+.git-branch-picker { margin: 0 12px 8px; }
+.git-branch-trigger { display: flex; align-items: center; gap: 7px; width: 100%; padding: 7px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel); font-size: 12px; text-align: left; }
+.git-branch-trigger svg { flex-shrink: 0; }
+.git-branch-trigger span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-branch-hint { display: block; margin-top: 5px; color: var(--muted); }
+.git-branch-options { margin-top: 4px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel); }
+.git-branch-options input, .git-repository select { width: 100%; min-width: 0; padding: 6px 8px; background: var(--input); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font: inherit; }
+.git-branch-list { max-height: 200px; overflow: auto; }
+.git-branch-list .search-result { padding: 5px 8px; overflow-wrap: anywhere; }
+.git-remote-actions, .git-remote-hint { margin: 0 12px 8px; color: var(--muted); font-size: 11px; }
+.git-remote-actions .git-repository { margin: 0 0 6px; }
+.git-remote-row { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.git-remote-row span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-remote-row .button { flex-shrink: 0; gap: 4px; padding: 5px 8px; }
+.git-repository { display: grid; gap: 4px; margin: 0 12px 8px; color: var(--muted); font-size: 11px; }
+.git-views { display: flex; border-block: 1px solid var(--border); }
+.git-views button { flex: 1; padding: 7px 4px; color: var(--muted); font-size: 12px; }
+.git-views button[aria-pressed="true"] { color: var(--text); box-shadow: inset 0 -2px var(--accent); }
+.git-commit > span { display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-more { margin: 8px 12px; }
+.git-commit-files { margin-top: 8px; }
+.git-index-actions { display: flex; flex-direction: column; align-items: flex-end; padding: 4px 10px; }
+.git-index-menu { min-width: 130px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel); }
+.git-index-menu .search-result { padding: 6px 8px; }
+.git-commit-form { display: grid; gap: 6px; margin: 0 12px 10px; color: var(--muted); font-size: 11px; }
+.git-commit-form label { display: grid; gap: 4px; }
+.git-commit-form textarea { width: 100%; min-height: 54px; resize: vertical; padding: 7px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--input); color: var(--text); font: inherit; }
+.git-commit-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.git-commit-actions .button { padding: 5px 10px; }
 .git-group-heading { display: flex; justify-content: space-between; margin: 0; padding: 8px 15px; background: var(--chrome); color: var(--muted); font-size: 11px; font-weight: 600; }
+.git-change-row { display: flex; align-items: center; padding-right: 8px; }
+.git-change-row .git-change { flex: 1; min-width: 0; }
+.git-index-button { flex-shrink: 0; }
 .git-change > span:last-child { min-width: 0; overflow-wrap: anywhere; }
 .git-badge { display: grid; place-items: center; flex: 0 0 20px; height: 20px; border-radius: 4px; background: var(--accent-tint); color: var(--accent); font: 600 11px Consolas, monospace; }
 [data-git-status="M"], [data-git-status="T"] { color: var(--git-modified); }

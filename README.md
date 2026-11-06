@@ -89,7 +89,15 @@ The desktop title bar is part of Leve's interface and follows its theme. Drag th
 
 ## Git changes
 
-With Git for Windows installed, open a repository folder in the desktop app and select **Git changes** in the activity bar. The panel groups files by staged changes, working tree changes, and untracked files. Click a file to see its unified diff in a read-only tab. A file with both staged and unstaged edits appears in both groups. Renames appear as a deletion and an addition.
+With Git for Windows installed, open a repository folder in the desktop app and select **Git changes** in the activity bar. The panel shows the current branch and lets you choose a repository if the project contains several. Select the branch name to search and switch between local branches. Save your open edits before switching. If you opened a subfolder, open the repository root to switch its branch.
+
+**Changes** groups files by staged changes, working tree changes, and untracked files. Click a file to see its unified diff in a read-only tab. A file with both staged and unstaged edits appears in both groups. Renames appear as a deletion and an addition. **History** lists commits from the selected repository and branch. Select a commit and a changed file to inspect the diff. Merge commits are compared with their first parent.
+
+Use **+** to stage a file's saved changes and **−** to unstage it while keeping the working copy. The **Staging actions** menu offers **Stage All** and **Unstage All** for the changes shown in the selected repository. Resolve conflicts separately before staging them.
+
+To create a local commit, open the repository root, enter a **Commit message**, and select **Commit**. Only staged content is included. The message stays in the form if Git rejects the commit, and successful commits appear in **History**.
+
+Use **Publish Branch** for the first push and choose a configured remote when prompted. Leve sets the remote branch as the upstream. **Push** sends commits to the upstream shown in the panel, and Git reports rejected pushes there.
 
 The staged diff compares the index to the last commit. The working tree diff compares saved content to the index, and untracked files are shown as additions. Save edits before inspecting their diff. The panel and Explorer update after a save or file operation in Leve. Use **Refresh Git changes** after running Git commands in the integrated terminal.
 
