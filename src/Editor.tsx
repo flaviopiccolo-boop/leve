@@ -1,11 +1,15 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react';
 import { basicSetup } from 'codemirror';
-import { Compartment, EditorState } from '@codemirror/state';
+import { indentWithTab, isolateHistory } from '@codemirror/commands';
+import { Compartment, countColumn, EditorState, type ChangeSet, type ChangeSpec } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
 import { forEachDiagnostic, lintGutter, nextDiagnostic, setDiagnosticsEffect } from '@codemirror/lint';
-import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
+import { HighlightStyle, indentUnit, syntaxHighlighting } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
 import { languageName, type OpenFile } from './workspace';
+import type { EditorPreferences, IndentStyle } from './editorPreferences';
+import { editorIndentGuides } from './editorIndentGuides';
+import { stripBom } from './textEncoding';
 import { languageError, languageFeature, languageFeatures, languageId, type Definition, type LanguageWorkspace, type Problem } from './language';
 import { themePresets, useTheme, type Theme } from './theme';
 
@@ -14,8 +18,12 @@ const editorTheme = (mode: Theme) => EditorView.theme({
   '.cm-scroller': { fontFamily: '"Cascadia Code", Consolas, monospace', lineHeight: '1.8' },
   '.cm-content': { padding: '18px 0', caretColor: 'var(--accent)' },
   '.cm-gutters': { backgroundColor: 'var(--panel)', color: 'var(--gutter)', border: 'none', minWidth: '54px' },
-  '.cm-activeLine, .cm-activeLineGutter': { backgroundColor: 'var(--active-line)' },
-  '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': { backgroundColor: 'var(--selection)' },
+  '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--active-line) 40%, transparent)' },
+  '.cm-activeLineGutter': { backgroundColor: 'var(--active-line)' },
+  '&.cm-editor .cm-selectionBackground': { backgroundColor: 'var(--selection)' },
+  '&.cm-editor.cm-focused > .cm-scroller > .cm-layer.cm-selectionLayer .cm-selectionBackground': {
+    backgroundColor: 'color-mix(in srgb, var(--accent) 38%, var(--selection))',
+  },
   '.cm-cursor': { borderLeftColor: 'var(--accent)' },
   '&.cm-focused': { outline: 'none' },
   '.cm-panels': { backgroundColor: 'var(--chrome)', color: 'var(--text)' },
@@ -48,24 +56,63 @@ async function loadLanguage(path: string) {
 
 export type EditorJump = { path: string; line: number; column: number; token: string; length?: number; matchedText?: string };
 
-export default function Editor({ file, jump, active, languageWorkspace, lspEnabled, lintEnabled, onProblems, onDefinition, onLanguageError, onJumpError, onChange, onSave, onCursor }: {
-  file: OpenFile; onChange: (path: string, value: string) => void;
+export interface EditorHandle {
+  convertIndentation(style: IndentStyle): void;
+}
+
+function indentationSettings(size: number, style: IndentStyle, tabWidth: number) {
+  const unit = style === 'tabs' ? '\t'.repeat(size / tabWidth) : ' '.repeat(size);
+  return [EditorState.tabSize.of(tabWidth), indentUnit.of(unit)];
+}
+
+function indentationChanges(state: EditorState, style: IndentStyle): ChangeSpec[] {
+  const changes: ChangeSpec[] = [];
+  let from = 0;
+  for (const line of state.doc.iterLines()) {
+    const leading = /^[ \t]+/.exec(line)?.[0];
+    if (leading) {
+      const columns = countColumn(leading, state.tabSize);
+      const insert = style === 'spaces' ? ' '.repeat(columns)
+        : '\t'.repeat(Math.floor(columns / state.tabSize)) + ' '.repeat(columns % state.tabSize);
+      if (insert !== leading) changes.push({ from, to: from + leading.length, insert });
+    }
+    from += line.length + 1;
+  }
+  return changes;
+}
+
+export default function Editor({ ref, file, jump, active, preferences, languageWorkspace, lspEnabled, lintEnabled, onProblems, onDefinition, onLanguageError, onJumpError, onChange, onSave, onSaveAs, onCursor }: {
+  ref?: Ref<EditorHandle>;
+  file: OpenFile; onChange: (path: string, changes: ChangeSet) => void;
+  preferences: Omit<EditorPreferences, 'indentSize'> & { indentSize: number; tabWidth: number };
   jump?: EditorJump | null; onJumpError?: () => void;
   languageWorkspace: LanguageWorkspace | null;
   active: boolean; lspEnabled: boolean; lintEnabled: boolean;
   onProblems: (path: string, problems: Problem[]) => void;
   onDefinition: (definition: Definition) => Promise<void>;
   onLanguageError: (message: string) => void;
-  onSave: (path: string) => void; onCursor: (line: number, col: number) => void;
+  onSave: (path: string) => void; onSaveAs: (path: string) => void; onCursor: (line: number, col: number) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const { theme } = useTheme();
   const themeRef = useRef(theme); themeRef.current = theme;
   const appearance = useRef(new Compartment());
+  const indentation = useRef(new Compartment());
+  const indentGuides = useRef(new Compartment());
   const intelligence = useRef(new Compartment());
   const diagnostics = useRef(new Compartment());
   const editor = useRef<EditorView | undefined>(undefined);
   const [ready, setReady] = useState<EditorView | null>(null);
+  const { indentSize, indentStyle, tabWidth } = preferences;
+  useImperativeHandle(ref, () => ({
+    convertIndentation(style) {
+      const view = editor.current;
+      if (!view) return;
+      const changes = indentationChanges(view.state, style);
+      if (changes.length) view.dispatch({ changes, annotations: isolateHistory.of('full'), userEvent: 'input.indent' });
+      requestAnimationFrame(() => { if (editor.current === view) view.focus(); });
+    },
+  }), []);
   const id = languageId(file.path);
   const languageCallbacks = useRef({ onDefinition, onLanguageError, onProblems, languageWorkspace, lspEnabled });
   languageCallbacks.current = { onDefinition, onLanguageError, onProblems, languageWorkspace, lspEnabled };
@@ -92,6 +139,13 @@ export default function Editor({ file, jump, active, languageWorkspace, lspEnabl
   useEffect(() => {
     editor.current?.dispatch({ effects: appearance.current.reconfigure(editorTheme(theme)) });
   }, [theme]);
+  const showIndentGuides = preferences.indentGuides !== 'off';
+  useEffect(() => {
+    if (ready && editor.current === ready) ready.dispatch({ effects: indentation.current.reconfigure(indentationSettings(indentSize, indentStyle, tabWidth)) });
+  }, [ready, indentSize, indentStyle, tabWidth]);
+  useEffect(() => {
+    if (ready && editor.current === ready) ready.dispatch({ effects: indentGuides.current.reconfigure(showIndentGuides ? editorIndentGuides : []) });
+  }, [ready, showIndentGuides]);
   useEffect(() => {
     if (!ready || editor.current !== ready) return;
     ready.dispatch({ effects: diagnostics.current.reconfigure(lspEnabled || lintEnabled ? [lintGutter(), keymap.of([{ key: 'F8', run: nextDiagnostic }])] : []) });
@@ -159,10 +213,11 @@ export default function Editor({ file, jump, active, languageWorkspace, lspEnabl
       if (disposed || !host.current) return;
       view = new EditorView({
         parent: host.current,
-        state: EditorState.create({ doc: file.content, extensions: [
-          basicSetup, appearance.current.of(editorTheme(themeRef.current)), intelligence.current.of([]), diagnostics.current.of([]), syntaxHighlighting(highlighting), language,
+        state: EditorState.create({ doc: stripBom(file.content), extensions: [
+          basicSetup, appearance.current.of(editorTheme(themeRef.current)), indentation.current.of(indentationSettings(indentSize, indentStyle, tabWidth)), indentGuides.current.of([]), intelligence.current.of([]), diagnostics.current.of([]), syntaxHighlighting(highlighting), language,
           keymap.of([
-            { key: 'Mod-s', run: () => { callbacks.current.onSave(file.path); return true; } },
+            indentWithTab,
+            { key: 'Mod-s', stopPropagation: true, run: () => { callbacks.current.onSave(file.path); return true; } },
             { key: 'F12', run: currentView => {
               const { languageWorkspace, lspEnabled, onDefinition, onLanguageError } = languageCallbacks.current;
               const feature = languageFeature(id);
@@ -177,7 +232,7 @@ export default function Editor({ file, jump, active, languageWorkspace, lspEnabl
             } },
           ]),
           EditorView.updateListener.of(update => {
-            if (update.docChanged) callbacks.current.onChange(file.path, update.state.doc.toString());
+            if (update.docChanged) callbacks.current.onChange(file.path, update.changes);
             if (update.docChanged || update.transactions.some(tr => tr.effects.some(effect => effect.is(setDiagnosticsEffect)))) {
               const problems: Problem[] = [];
               forEachDiagnostic(update.state, (diagnostic, from) => {
@@ -208,5 +263,10 @@ export default function Editor({ file, jump, active, languageWorkspace, lspEnabl
     // Preserve the editor and undo history as its document changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file.path]);
-  return <div className="editor-host" ref={host} />;
+  return <div className="editor-host" ref={host} data-indent-guides={preferences.indentGuides} data-indent-guide-palette={preferences.indentGuidePalette} onKeyDownCapture={event => {
+    if (!(event.ctrlKey || event.metaKey) || !event.shiftKey || event.key.toLowerCase() !== 's') return;
+    event.preventDefault();
+    event.stopPropagation();
+    onSaveAs(file.path);
+  }} />;
 }

@@ -19,6 +19,7 @@ export async function loadSession(): Promise<Session | null> {
   if (data.version !== 1 || !Array.isArray(data.files) || data.files.length > 100 ||
       !(data.root === null || typeof data.root === 'string') || typeof data.activeFile !== 'string' || !data.layout ||
       data.files.some((file: OpenFile) => !file || typeof file.path !== 'string' || typeof file.name !== 'string' || typeof file.content !== 'string' || typeof file.saved !== 'string' ||
+        (file.lineEnding !== undefined && !['LF', 'CRLF', 'CR'].includes(file.lineEnding)) ||
         (file.image !== undefined && (file.image !== true || file.content !== '' || file.saved !== '')))) {
     throw new Error('Invalid recovery data. The existing snapshot has been preserved.');
   }
@@ -56,7 +57,7 @@ export async function restoreFiles(savedFiles: OpenFile[]): Promise<{ files: Rec
       try {
         const content = await readFile(file.path);
         if (typeof content !== 'string') throw new Error('File not found');
-        files[file.path] = { ...file, content, saved: content };
+        files[file.path] = { ...file, content, saved: content, lineEnding: content === file.saved ? file.lineEnding : undefined };
       } catch { warnings.push(`${file.name} could not be reopened.`); }
     }
   }

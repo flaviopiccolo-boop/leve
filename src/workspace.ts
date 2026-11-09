@@ -1,8 +1,11 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
+import type { LineEnding } from './lineEndings';
+import type { FileIndentation } from './editorConfig';
+import { stripBom } from './textEncoding';
 
 export interface FileEntry { name: string; path: string; directory: boolean }
-export interface OpenFile { path: string; name: string; content: string; saved: string; image?: true }
+export interface OpenFile { path: string; name: string; content: string; saved: string; image?: true; lineEnding?: LineEnding; indentation?: FileIndentation }
 export const native = isTauri();
 const imageTypes = new Map([
   ['png', 'image/png'], ['jpg', 'image/jpeg'], ['jpeg', 'image/jpeg'], ['webp', 'image/webp'],
@@ -32,6 +35,18 @@ export async function pickWorkspace(): Promise<string | null> {
   if (!native) return null;
   const path = await open({ directory: true, multiple: false, title: 'Open project folder' });
   return path;
+}
+export async function pickSaveFolder(root: string, folder: string): Promise<string | null> {
+  const project = root.replaceAll('\\', '/').replace(/\/+$/, '');
+  const selected = await open({
+    directory: true, multiple: false, title: 'Choose a folder inside the project',
+    defaultPath: `${project}/${folder}`.replaceAll('/', '\\'),
+  });
+  if (selected === null) return null;
+  const path = selected.replaceAll('\\', '/').replace(/\/+$/, '');
+  if (path.toLowerCase() === project.toLowerCase()) return '';
+  if (path.toLowerCase().startsWith(`${project.toLowerCase()}/`)) return path.slice(project.length + 1);
+  throw new Error('Choose a folder inside the current project.');
 }
 export async function activateWorkspace(path: string): Promise<string> {
   const root = await invoke<string>('set_workspace', { path });
@@ -78,6 +93,29 @@ export async function writeFile(file: OpenFile): Promise<void> {
   if (native && workspaceSelected) await invoke('write_file', { path: file.path, content: file.content, expected: file.saved });
   else demo[file.path] = file.content;
 }
+
+type SaveAsResult = { status: 'saved' } | { status: 'exists'; expected: string };
+
+export async function saveFileAs(path: string, content: string, expectedRoot: string | null, expected?: string): Promise<SaveAsResult> {
+  if (native && workspaceSelected) return invoke<SaveAsResult>('save_file_as', { path, content, expectedRoot, expected: expected ?? null });
+  const parts = path.split('/');
+  parts.forEach(validateDemoName);
+  const parent = parts.slice(0, -1).join('/');
+  if (parent && !demoFolders.has(parent)) throw new Error('The destination folder does not exist.');
+  if ([...demoFolders].some(folder => folder.toLowerCase() === path.toLowerCase())) throw new Error('A folder with that name already exists.');
+  const existing = Object.keys(demo).find(file => file.toLowerCase() === path.toLowerCase());
+  const saved = existing === undefined ? undefined : demo[existing];
+  if (existing !== undefined && existing !== path) throw new Error('Use the existing spelling of the destination file.');
+  if (typeof saved === 'object') throw new Error('Choose a text file.');
+  if (expected !== undefined && saved !== expected) throw new Error('The destination changed before it could be saved.');
+  if (expected === undefined && typeof saved === 'string') return { status: 'exists', expected: saved };
+  Object.defineProperty(demo, path, { value: content, writable: true, enumerable: true, configurable: true });
+  return { status: 'saved' };
+}
+
+function validateDemoName(name: string) {
+  if (!name || name.trim() !== name || /[<>:"/\\|?*\x00-\x1f]/.test(name) || /[. ]$/.test(name) || /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(name)) throw new Error('Use a valid Windows file or folder name.');
+}
 export function fileName(path: string) { return path.split(/[\\/]/).pop() || path; }
 export const withinEntry = (path: string, parent: string) => path.toLowerCase() === parent.toLowerCase() || path.toLowerCase().startsWith(`${parent.toLowerCase()}/`);
 export type FileOperation = { kind: 'file'; parent: string } | { kind: 'folder'; parent: string } | { kind: 'rename'; entry: FileEntry } | { kind: 'delete'; entry: FileEntry };
@@ -94,7 +132,7 @@ export async function mutateEntry(operation: FileOperation, name: string, expect
     for (const path of demoFolders) if (withinEntry(path, operation.entry.path)) demoFolders.delete(path);
     return '';
   }
-  if (!name || name.trim() !== name || /[<>:"/\\|?*\x00-\x1f]/.test(name) || /[. ]$/.test(name) || /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(name)) throw new Error('Use a valid Windows file or folder name.');
+  validateDemoName(name);
   const parent = operation.kind === 'rename' ? operation.entry.path.split('/').slice(0, -1).join('/') : operation.parent;
   const target = parent ? `${parent}/${name}` : name;
   if (operation.kind === 'rename' && target === operation.entry.path) return target;
@@ -133,7 +171,7 @@ export async function searchContent(query: string, caseSensitive: boolean, id: s
     if (path.split('/').some(part => ['.git', 'node_modules', 'target', '.venv', 'venv', '__pycache__', 'dist', 'build', '.next', '.idea'].includes(part.toLowerCase()))) continue;
     if (typeof content !== 'string') { result.skipped += 1; continue; }
     result.scanned += 1;
-    const lines = content.split(/\r?\n/);
+    const lines = stripBom(content).split(/\r?\n/);
     for (const [index, line] of lines.entries()) for (const found of line.matchAll(matcher)) {
       if (result.matches.length >= 500) { result.limit = 'Result limit reached (500). Narrow your search.'; return result; }
       const column = found.index!;

@@ -13,14 +13,16 @@ test('decorates nested Git changes and opens diffs without changing a dirty edit
     let stagedNew = false;
     let committedNew = false;
     let published = false;
+    let fetched = false;
+    let pulled = false;
     let pushAttempts = 0;
     const commit = '1234567890123456789012345678901234567890';
     const newCommit = '2345678901234567890123456789012345678901';
-    const fixture = { initialized: false, switchCalls: 0, commitCalls: 0 };
+    const fixture = { initialized: false, switchCalls: 0, commitCalls: 0, longLists: false };
     Object.assign(window, { gitFixture: fixture, isTauri: true, __TAURI_INTERNALS__: {
       metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
       transformCallback: () => ++callback, unregisterCallback: () => {},
-      invoke: async (command: string, args: { expectedRoot?: string; path?: string; kind?: string; repo?: string; branch?: string; head?: string; commit?: string; action?: string; paths?: string[]; request?: { branch: string; head: string; message?: string; paths?: string[]; publish?: boolean; target?: { remote: string; reference: string } } } = {}) => {
+      invoke: async (command: string, args: { expectedRoot?: string; path?: string; kind?: string; repo?: string; branch?: string; head?: string; commit?: string; action?: string; paths?: string[]; request?: { branch: string; head: string; operation?: string; remote?: string; message?: string; paths?: string[]; publish?: boolean; target?: { remote: string; reference: string } } } = {}) => {
         if (command === 'session_load') return null;
         if (command === 'list_shells') return [];
         if (command === 'plugin:event|listen') return 1;
@@ -28,12 +30,13 @@ test('decorates nested Git changes and opens diffs without changing a dirty edit
         if (command === 'list_directory') return args.path === ''
           ? [{ name: 'app', path: 'app', directory: true }]
           : [{ name: 'file.txt', path: 'app/file.txt', directory: false }, { name: 'new.txt', path: 'app/new.txt', directory: false }];
-        if (command === 'read_file') return branch === 'main' ? 'working\n' : 'feature branch content\n';
+        if (command === 'read_file') return branch === 'main' ? 'working\n' : pulled ? 'pulled branch content\n' : 'feature branch content\n';
         if (command === 'write_file') { saved = true; return; }
         if (command === 'git_status') {
           if (args.expectedRoot !== root) throw new Error('Unexpected workspace');
           if (!fixture.initialized) return [];
-          return [{ id: 'app', branch, head: branch === 'main' && committedNew ? newCommit : commit, canSwitch: true, changes: branch !== 'main' ? [] : [
+          const featureChanges = fixture.longLists ? Array.from({ length: 50 }, (_, index) => ({ path: `app/change-${index}.txt`, status: 'M', kind: 'working' })) : [];
+          return [{ id: 'app', branch, head: branch === 'main' && committedNew ? newCommit : commit, canSwitch: true, changes: branch !== 'main' ? featureChanges : [
             ...(stagedFile ? [{ path: 'app/file.txt', status: 'M', kind: 'staged' }] : []),
             ...(workingFile ? [{ path: 'app/file.txt', status: 'M', kind: 'working' }] : []),
             ...(!committedNew ? [{ path: 'app/new.txt', status: stagedNew ? 'A' : '?', kind: stagedNew ? 'staged' : 'untracked' }] : []),
@@ -56,7 +59,7 @@ test('decorates nested Git changes and opens diffs without changing a dirty edit
         }
         if (command === 'git_remote_status') {
           if (args.repo !== 'app' || args.branch !== 'feature/branch') return { remotes: [], upstream: null };
-          return { remotes: ['backup', 'origin'], upstream: published ? { remote: 'backup', reference: 'refs/heads/feature/branch' } : null };
+          return { remotes: ['backup', 'origin'], upstream: published ? { remote: 'backup', reference: 'refs/heads/feature/branch' } : null, comparison: published ? { ahead: 0, behind: fetched && !pulled ? 2 : 0 } : null };
         }
         if (command === 'git_push') {
           if (args.expectedRoot !== root || args.repo !== 'app' || args.request?.branch !== 'feature/branch' || args.request.head !== commit || args.request.target?.remote !== 'backup' || args.request.target.reference !== 'refs/heads/feature/branch' || args.request.publish === published) throw new Error('Unexpected push request');
@@ -70,6 +73,16 @@ test('decorates nested Git changes and opens diffs without changing a dirty edit
           branch = args.branch;
           return;
         }
+        if (command === 'git_receive') {
+          if (args.expectedRoot !== root || args.repo !== 'app') throw new Error('Unexpected receive request');
+          const request = args.request;
+          if (request?.operation === 'fetch' && request.remote === 'backup') { fetched = true; return; }
+          if (request?.operation === 'pull' && request.branch === 'feature/branch' && request.head === commit && request.target?.remote === 'backup' && request.target.reference === 'refs/heads/feature/branch') {
+            pulled = true;
+            return;
+          }
+          throw new Error('Unexpected receive target');
+        }
         if (command === 'git_create_commit') {
           if (args.expectedRoot !== root || args.repo !== 'app' || !stagedNew || args.request?.branch !== 'main' || args.request.head !== commit || args.request.message !== 'Registra alterações\n\n#123 Detalhes' || args.request.paths?.join() !== 'app/new.txt') throw new Error('Unexpected commit request');
           fixture.commitCalls += 1;
@@ -81,7 +94,8 @@ test('decorates nested Git changes and opens diffs without changing a dirty edit
         if (command === 'git_history') {
           if (args.repo === 'app' && args.head === newCommit) return { commits: [{ id: newCommit, subject: 'Registra alterações', author: 'LEVE', date: 1700000001 }], hasMore: false };
           if (args.repo !== 'app' || args.head !== commit) throw new Error('Unexpected history request');
-          return { commits: [{ id: commit, subject: 'Add branch content', author: 'LEVE', date: 1700000000 }], hasMore: false };
+          const older = fixture.longLists ? Array.from({ length: 29 }, (_, index) => ({ id: String(index).padStart(40, '0'), subject: `Earlier commit ${index}`, author: 'LEVE', date: 1699999999 - index })) : [];
+          return { commits: [{ id: commit, subject: 'Add branch content', author: 'LEVE', date: 1700000000 }, ...older], hasMore: false };
         }
         if (command === 'git_commit_files' && args.commit === commit) return ['file.txt'];
         if (command === 'git_commit_diff' && args.commit === commit && args.path === 'file.txt') return '@@ -1 +1 @@\n-working\n+feature branch content\n';
@@ -200,7 +214,38 @@ test('decorates nested Git changes and opens diffs without changing a dirty edit
   await expect(git.getByRole('alert')).toContainText('non-fast-forward');
   await push.click();
   await expect(git.getByText('Pushed to backup/feature/branch.')).toBeVisible();
+  await expect(git.getByText('Up to date with upstream')).toBeVisible();
+  await git.getByRole('button', { name: 'Fetch', exact: true }).click();
+  await expect(git.getByText('Fetched from backup.')).toBeVisible();
+  await expect(git.getByText('0 ahead · 2 behind')).toBeVisible();
+  await expect(editor).toContainText('feature branch content');
+  await git.getByRole('button', { name: 'Pull', exact: true }).click();
+  await expect(git.getByText('Checked for updates from backup/feature/branch.')).toBeVisible();
+  await expect(git.getByText('Up to date with upstream')).toBeVisible();
+  await expect(editor).toContainText('pulled branch content');
+  await page.evaluate(() => { (window as Window & { gitFixture: { longLists: boolean } }).gitFixture.longLists = true; });
+  const gitResults = git.getByRole('region', { name: 'Git results', exact: true });
+  const branchControl = git.getByRole('button', { name: 'Switch branch (current: feature/branch)' });
+  const history = git.getByRole('button', { name: 'History', exact: true });
+  await git.getByRole('button', { name: 'Refresh Git changes' }).click();
+  await expect(gitResults.getByRole('button', { name: 'View diff for app/change-49.txt' })).toHaveCount(1);
+  const commitMessagePosition = await commitMessage.boundingBox();
+  const branchPosition = await branchControl.boundingBox();
+  const historyPosition = await history.boundingBox();
+  await gitResults.hover();
+  await page.mouse.wheel(0, 500);
+  await expect.poll(() => gitResults.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+  expect(await commitMessage.boundingBox()).toEqual(commitMessagePosition);
+  expect(await branchControl.boundingBox()).toEqual(branchPosition);
+  expect(await history.boundingBox()).toEqual(historyPosition);
   await git.getByRole('button', { name: 'History', exact: true }).click();
+  await expect(gitResults.getByRole('button', { name: /Earlier commit 28/ })).toHaveCount(1);
+  await expect.poll(() => gitResults.evaluate(element => element.scrollTop)).toBe(0);
+  await gitResults.hover();
+  await page.mouse.wheel(0, 500);
+  await expect.poll(() => gitResults.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+  expect(await branchControl.boundingBox()).toEqual(branchPosition);
+  expect(await history.boundingBox()).toEqual(historyPosition);
   await git.getByRole('button', { name: /Add branch content/ }).click();
   const commitView = page.getByRole('region', { name: 'Git commit', exact: true });
   await expect(commitView.getByLabel('Changed files (1)')).toHaveValue('file.txt');

@@ -666,6 +666,30 @@ pub(crate) struct PushTarget {
 pub(crate) struct RemoteStatus {
     remotes: Vec<String>,
     upstream: Option<PushTarget>,
+    comparison: Option<UpstreamComparison>,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct UpstreamComparison {
+    ahead: u64,
+    behind: u64,
+}
+
+fn compare_upstream(root: &Path, branch: &str) -> Option<UpstreamComparison> {
+    let reference = format!("refs/heads/{branch}");
+    let range = format!("{reference}...{branch}@{{upstream}}");
+    let counts = git_text(
+        root,
+        &["rev-list", "--left-right", "--count", &range, "--"],
+        STATUS_LIMIT,
+        "The Git upstream comparison exceeds 1 MiB.",
+    )
+    .ok()?;
+    let (ahead, behind) = counts.trim().split_once('\t')?;
+    Some(UpstreamComparison {
+        ahead: ahead.parse().ok()?,
+        behind: behind.parse().ok()?,
+    })
 }
 
 fn remote_status(root: &Path, branch: &str) -> Result<RemoteStatus, String> {
@@ -702,6 +726,7 @@ fn remote_status(root: &Path, branch: &str) -> Result<RemoteStatus, String> {
     Ok(RemoteStatus {
         remotes: remotes.lines().map(str::to_owned).collect(),
         upstream,
+        comparison: None,
     })
 }
 
@@ -714,7 +739,12 @@ pub(crate) async fn git_remote_status(
 ) -> Result<RemoteStatus, String> {
     let root = files::current_root(&state, &expected_root)?;
     tauri::async_runtime::spawn_blocking(move || {
-        remote_status(&select_repository(&root, &repo, true)?, &branch)
+        let repo = select_repository(&root, &repo, true)?;
+        let mut status = remote_status(&repo, &branch)?;
+        if status.upstream.is_some() {
+            status.comparison = compare_upstream(&repo, &branch);
+        }
+        Ok(status)
     })
     .await
     .map_err(error)?
@@ -728,8 +758,8 @@ pub(crate) struct PushRequest {
     publish: bool,
 }
 
-fn push_branch(root: &Path, request: PushRequest) -> Result<(), String> {
-    let reference = format!("refs/heads/{}", request.branch);
+fn check_branch_head(root: &Path, name: &str, expected_head: &str) -> Result<(), String> {
+    let reference = format!("refs/heads/{name}");
     let branch = git_text(
         root,
         &["symbolic-ref", "--quiet", "HEAD"],
@@ -742,9 +772,15 @@ fn push_branch(root: &Path, request: PushRequest) -> Result<(), String> {
         STATUS_LIMIT,
         "The Git revision is too long.",
     )?;
-    if branch.trim_end() != reference || head.trim_end() != request.head {
+    if branch.trim_end() != reference || head.trim_end() != expected_head {
         return Err("The branch changed. Review the refreshed Git panel and try again.".into());
     }
+    Ok(())
+}
+
+fn push_branch(root: &Path, request: PushRequest) -> Result<(), String> {
+    check_branch_head(root, &request.branch, &request.head)?;
+    let reference = format!("refs/heads/{}", request.branch);
     let status = remote_status(root, &request.branch)?;
     if !status.remotes.contains(&request.target.remote)
         || !request.target.reference.starts_with("refs/heads/")
@@ -807,6 +843,131 @@ pub(crate) async fn git_push(
         let _operation = state.operations.lock().map_err(error)?;
         let root = files::current_root(&state, &expected_root)?;
         push_branch(&select_repository(&root, &repo, true)?, request)
+    })
+    .await
+    .map_err(error)?
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "operation", rename_all = "lowercase")]
+pub(crate) enum ReceiveRequest {
+    Fetch {
+        remote: String,
+    },
+    Pull {
+        branch: String,
+        head: String,
+        target: PushTarget,
+    },
+}
+
+fn fetch_remote(root: &Path, remote: &str, reference: &str) -> Result<(), String> {
+    git_text(
+        root,
+        &[
+            "fetch",
+            "--no-tags",
+            "--no-prune",
+            "--no-prune-tags",
+            "--no-recurse-submodules",
+            "--refmap=",
+            "--",
+            remote,
+            reference,
+        ],
+        STATUS_LIMIT,
+        "Git returned too much output while fetching.",
+    )?;
+    Ok(())
+}
+
+fn require_clean_worktree(root: &Path) -> Result<(), String> {
+    let status = git_text(
+        root,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=normal",
+            "--ignore-submodules=none",
+        ],
+        STATUS_LIMIT,
+        "The Git working tree status exceeds 1 MiB.",
+    )?;
+    if !status.is_empty() {
+        return Err(
+            "Pull requires a clean working tree. Commit or stash your local changes first.".into(),
+        );
+    }
+    Ok(())
+}
+
+fn receive_remote(root: &Path, request: ReceiveRequest) -> Result<(), String> {
+    match request {
+        ReceiveRequest::Fetch { remote } => {
+            if !remote_status(root, "")?.remotes.contains(&remote) {
+                return Err("Choose an available Git remote.".into());
+            }
+            fetch_remote(
+                root,
+                &remote,
+                &format!("+refs/heads/*:refs/remotes/{remote}/*"),
+            )
+        }
+        ReceiveRequest::Pull {
+            branch,
+            head,
+            target,
+        } => {
+            check_branch_head(root, &branch, &head)?;
+            let status = remote_status(root, &branch)?;
+            let upstream = target
+                .reference
+                .strip_prefix("refs/heads/")
+                .filter(|_| {
+                    status.upstream.as_ref() == Some(&target)
+                        && status.remotes.contains(&target.remote)
+                })
+                .ok_or("The upstream changed. Review the refreshed Git panel and try again.")?;
+            require_clean_worktree(root)?;
+            let refspec = format!(
+                "+{}:refs/remotes/{}/{upstream}",
+                target.reference, target.remote
+            );
+            fetch_remote(root, &target.remote, &refspec)?;
+            let revision = format!("refs/remotes/{}/{upstream}", target.remote);
+            check_branch_head(root, &branch, &head)?;
+            require_clean_worktree(root)?;
+            git_text(
+                root,
+                &[
+                    "merge",
+                    "--ff-only",
+                    "--no-squash",
+                    "--no-autostash",
+                    "--no-overwrite-ignore",
+                    "--",
+                    &revision,
+                ],
+                STATUS_LIMIT,
+                "Git returned too much output while pulling.",
+            )?;
+            Ok(())
+        }
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn git_receive(
+    repo: String,
+    request: ReceiveRequest,
+    expected_root: String,
+    app: AppHandle,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<Workspace>();
+        let _operation = state.operations.lock().map_err(error)?;
+        let root = files::current_root(&state, &expected_root)?;
+        receive_remote(&select_repository(&root, &repo, true)?, request)
     })
     .await
     .map_err(error)?
@@ -1143,6 +1304,61 @@ mod tests {
             .unwrap_err()
             .contains("non-fast-forward"));
         assert_eq!(head(&remote, "refs/heads/main"), remote_head);
+
+        let pull = || ReceiveRequest::Pull {
+            branch: "main".into(),
+            head: head(&work, "HEAD"),
+            target: remote_status(&work, "main").unwrap().upstream.unwrap(),
+        };
+        assert!(receive_remote(&work, pull())
+            .unwrap_err()
+            .contains("clean working tree"));
+        git(&work, &["reset", "--hard", "HEAD"]);
+        let original_head = head(&work, "HEAD");
+        receive_remote(
+            &work,
+            ReceiveRequest::Fetch {
+                remote: "origin".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(head(&work, "HEAD"), original_head);
+        assert_eq!(head(&work, "refs/remotes/origin/main"), remote_head);
+        assert_eq!(
+            compare_upstream(&work, "main"),
+            Some(UpstreamComparison {
+                ahead: 0,
+                behind: 1
+            })
+        );
+        receive_remote(&work, pull()).unwrap();
+        assert_eq!(head(&work, "HEAD"), remote_head);
+        assert_eq!(
+            compare_upstream(&work, "main"),
+            Some(UpstreamComparison {
+                ahead: 0,
+                behind: 0
+            })
+        );
+        assert!(fs::read_to_string(work.join("file.txt"))
+            .unwrap()
+            .contains("second version"));
+
+        git(&work, &["reset", "--hard", "HEAD^"]);
+        git(
+            &work,
+            &["commit", "--allow-empty", "-qm", "Local-only commit"],
+        );
+        let divergent_head = head(&work, "HEAD");
+        assert_eq!(
+            compare_upstream(&work, "main"),
+            Some(UpstreamComparison {
+                ahead: 1,
+                behind: 1
+            })
+        );
+        assert!(receive_remote(&work, pull()).is_err());
+        assert_eq!(head(&work, "HEAD"), divergent_head);
     }
 
     #[test]

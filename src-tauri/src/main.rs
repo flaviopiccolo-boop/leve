@@ -203,7 +203,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Workspace::default())
         .manage(session::SessionStore::default())
-        .invoke_handler(tauri::generate_handler![set_workspace, list_directory, read_file, read_image, write_file, files::create_entry, files::rename_entry, files::delete_entry, search::search_content, search::cancel_search, git::git_status, git::git_diff, git::git_update_index, git::git_create_commit, git::git_remote_status, git::git_push, git::git_branches, git::git_switch, git::git_history, git::git_commit_files, git::git_commit_diff, shells::list_shells, terminal_start, terminal_write, terminal_resize, terminal_close, session::session_load, session::session_save, language::lsp_start, language::lsp_send, language::lsp_stop, language::lsp_document, language::lsp_resolve, language::eslint_check])
+        .invoke_handler(tauri::generate_handler![set_workspace, list_directory, read_file, read_image, write_file, files::save_file_as, files::create_entry, files::rename_entry, files::delete_entry, search::search_content, search::cancel_search, git::git_status, git::git_diff, git::git_update_index, git::git_create_commit, git::git_remote_status, git::git_push, git::git_receive, git::git_branches, git::git_switch, git::git_history, git::git_commit_files, git::git_commit_diff, shells::list_shells, terminal_start, terminal_write, terminal_resize, terminal_close, session::session_load, session::session_save, language::lsp_start, language::lsp_send, language::lsp_stop, language::lsp_document, language::lsp_resolve, language::eslint_check])
         .build(tauri::generate_context!())
         .expect("Could not start Leve")
         .run(|app, event| {

@@ -34,6 +34,37 @@ test('starts with the explorer on the left and terminals below the editor', asyn
   expect(errors).toEqual([]);
 });
 
+test('switches open header menus on hover and opens a Settings section', async ({ page }) => {
+  await page.goto('/');
+  const nav = page.getByRole('navigation', { name: 'Application menus' });
+  const trigger = (name: string) => nav.getByRole('button', { name, exact: true });
+  const menu = (name: string) => page.getByRole('menu', { name, exact: true });
+  await trigger('Edit').hover();
+  await expect(menu('Edit')).toHaveCount(0);
+  await trigger('File').click();
+  await expect(menu('File')).toBeVisible();
+  await trigger('Edit').hover();
+  await expect(menu('Edit')).toBeVisible();
+  await expect(menu('File')).toHaveCount(0);
+  await trigger('View').hover();
+  await expect(menu('View')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(trigger('View')).toBeFocused();
+  await expect(menu('View')).toHaveCount(0);
+  await trigger('File').click();
+  await trigger('Settings menu').hover();
+  await expect(menu('Settings')).toBeVisible();
+  await menu('Settings').getByRole('menuitem', { name: 'Editor Settings…' }).click();
+  const settings = page.getByRole('dialog', { name: 'Settings' });
+  await expect(settings.getByRole('heading', { name: 'Editor', exact: true })).toBeVisible();
+  await settings.getByRole('button', { name: 'Close settings' }).click();
+  await expect(trigger('Settings menu')).toBeFocused();
+  await trigger('Settings menu').click();
+  await expect(menu('Settings')).toBeVisible();
+  await trigger('Settings menu').click();
+  await expect(menu('Settings')).toHaveCount(0);
+});
+
 test('edits a file, marks it dirty, saves and preserves the session content after reopening', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'main.py', exact: true }).click();
@@ -54,6 +85,137 @@ test('edits a file, marks it dirty, saves and preserves the session content afte
   await page.screenshot({ path: 'artifacts/leve-code.png' });
 });
 
+test('saves unsaved edits as another file while keeping the original', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'main.py', exact: true }).click();
+  const code = page.locator('.cm-content:visible');
+  await code.click();
+  await page.keyboard.press('Control+a');
+  await page.keyboard.insertText('# Saved under a new name');
+  await page.keyboard.press('Control+Shift+s');
+  const saveAs = page.getByRole('dialog', { name: 'Save As' });
+  const path = saveAs.getByLabel('Destination path');
+  await expect(path).toHaveValue('src/main.py');
+  await path.fill('README.md');
+  page.once('dialog', dialog => dialog.dismiss());
+  await saveAs.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(path).toBeEnabled();
+  await path.fill('cópia.py');
+  await saveAs.getByLabel('Save in').selectOption('src');
+  await saveAs.getByLabel('Save as type').selectOption('md');
+  await expect(path).toHaveValue('src/cópia.md');
+  await saveAs.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(saveAs).toBeHidden();
+  await expect(page.getByRole('tab', { name: 'cópia.md', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(code).toHaveText('# Saved under a new name');
+  await expect(page.locator('.statusbar')).toContainText('Markdown');
+  await page.getByRole('button', { name: 'main.py', exact: true }).click();
+  await expect(code).toContainText('from services.greeting import greet');
+  await page.getByRole('button', { name: 'README.md', exact: true }).click();
+  await expect(code).toContainText('Your next project starts here');
+});
+
+test('saves a copy of unsaved edits while keeping the original tab active', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'main.py', exact: true }).click();
+  const code = page.locator('.cm-content:visible');
+  const original = page.getByRole('tab', { name: 'main.py', exact: true });
+  await code.click();
+  await page.keyboard.press('Control+End');
+  await page.keyboard.insertText('\n# draft for copy');
+  await page.getByRole('button', { name: 'File', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Save a Copy As…', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Save a Copy As' });
+  await expect(dialog.getByLabel('Destination path')).toHaveValue('src/main-copy.py');
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(original).toHaveAttribute('aria-selected', 'true');
+  await expect(original.locator('.dirty-dot')).toHaveCount(1);
+  await expect(code).toContainText('# draft for copy');
+  await expect(page.getByRole('tab', { name: 'main-copy.py', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'main-copy.py', exact: true }).click();
+  await expect(code).toContainText('# draft for copy');
+  await expect(page.getByRole('tab', { name: 'main-copy.py', exact: true }).locator('.dirty-dot')).toHaveCount(0);
+  await original.click();
+});
+
+test('shows a distinct selection over the active line', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'main.py', exact: true }).click();
+  const code = page.locator('.cm-content');
+  await code.click();
+  await page.keyboard.press('Control+Home');
+  await page.keyboard.press('Control+Shift+ArrowRight');
+  const activeLine = code.locator('.cm-activeLine');
+  const selection = page.locator('.cm-selectionBackground');
+  await expect(selection).toBeVisible();
+  const selected = (await selection.boundingBox())!;
+  const active = (await activeLine.boundingBox())!;
+  expect(selected.y).toBeGreaterThanOrEqual(active.y);
+  expect(selected.y).toBeLessThan(active.y + active.height);
+  expect(selected.width).toBeLessThan(active.width);
+  expect(await activeLine.evaluate(line => getComputedStyle(line).backgroundColor)).toMatch(/0\.4\)$/);
+  const selectionColor = await selection.evaluate(mark => getComputedStyle(mark).backgroundColor);
+  expect(selectionColor).not.toBe('rgb(34, 51, 51)');
+});
+
+test('indents selected lines with Tab and preserves keyboard focus navigation', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'main.py', exact: true }).click();
+  const code = page.locator('.cm-content');
+  const lines = code.locator('.cm-line');
+  await code.click();
+  await page.keyboard.press('Control+a');
+  await page.keyboard.insertText('alpha\nbeta\ngamma');
+  await page.keyboard.press('Control+Home');
+  await page.keyboard.press('Shift+ArrowDown');
+  await page.keyboard.press('Shift+ArrowDown');
+  await page.keyboard.press('Tab');
+  await expect.poll(() => lines.allTextContents()).toEqual(['  alpha', '  beta', 'gamma']);
+  await expect(code).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect.poll(() => lines.allTextContents()).toEqual(['alpha', 'beta', 'gamma']);
+  await page.keyboard.press('Control+]');
+  await expect.poll(() => lines.allTextContents()).toEqual(['  alpha', '  beta', 'gamma']);
+  await page.keyboard.press('Control+[');
+  await expect.poll(() => lines.allTextContents()).toEqual(['alpha', 'beta', 'gamma']);
+  await page.keyboard.press('Control+m');
+  await page.keyboard.press('Tab');
+  await expect(code).not.toBeFocused();
+  expect(await lines.allTextContents()).toEqual(['alpha', 'beta', 'gamma']);
+});
+
+test('uses the configured tab width and converts leading whitespace with undo', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'main.py', exact: true }).click();
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  const settings = page.getByRole('dialog', { name: 'Settings' });
+  await settings.getByRole('button', { name: 'Editor', exact: true }).click();
+  await settings.getByLabel('Default indentation style').selectOption('tabs');
+  await settings.getByLabel('Default indentation size').selectOption('4');
+  await settings.getByRole('button', { name: 'Close settings' }).click();
+  const code = page.locator('.cm-content');
+  const lines = code.locator('.cm-line');
+  await code.click();
+  await page.keyboard.press('Control+a');
+  await page.keyboard.insertText('    alpha\tvalue\n  beta\ngamma');
+  await page.keyboard.press('Control+End');
+  await page.keyboard.press('Tab');
+  await expect.poll(() => lines.allTextContents()).toEqual(['    alpha\tvalue', '  beta', '\tgamma']);
+
+  const convert = async (style: 'Tabs' | 'Spaces') => {
+    await page.getByRole('button', { name: 'Edit', exact: true }).click();
+    await page.getByRole('menuitem', { name: `Convert Indentation to ${style}` }).click();
+  };
+  await convert('Tabs');
+  await expect.poll(() => lines.allTextContents()).toEqual(['\talpha\tvalue', '  beta', '\tgamma']);
+  await convert('Spaces');
+  await expect.poll(() => lines.allTextContents()).toEqual(['    alpha\tvalue', '  beta', '    gamma']);
+  await expect(code).toBeFocused();
+  await page.keyboard.press('Control+z');
+  await expect.poll(() => lines.allTextContents()).toEqual(['\talpha\tvalue', '  beta', '\tgamma']);
+});
+
 test('finds nested files through Ctrl+P', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('.statusbar')).toContainText('Recovery saved');
@@ -62,6 +224,35 @@ test('finds nested files through Ctrl+P', async ({ page }) => {
   await page.locator('#file-search').fill('greeting');
   await page.locator('.search-result').click();
   await expect(page.locator('.cm-content')).toContainText('def greet(name: str)');
+});
+
+test('applies indentation guide styles and remembers the soft color palette', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'main.py', exact: true }).click();
+  const editor = page.locator('.editor-host');
+  await expect(editor).toHaveAttribute('data-indent-guides', 'off');
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  const settings = page.getByRole('dialog', { name: 'Settings' });
+  await settings.getByRole('button', { name: 'Editor', exact: true }).click();
+  const guides = settings.getByLabel('Indentation guides');
+  const colors = settings.getByLabel('Guide colors');
+  await expect(colors).toBeDisabled();
+  await guides.selectOption('dotted');
+  await colors.selectOption('soft');
+  await settings.getByRole('button', { name: 'Close settings' }).click();
+  await expect(editor).toHaveAttribute('data-indent-guide-palette', 'soft');
+  const guide = editor.locator('.cm-indent-guides').first();
+  await expect(guide).toBeVisible();
+  const style = await guide.evaluate(line => {
+    const pseudo = getComputedStyle(line, '::before');
+    return { background: pseudo.backgroundImage, mask: pseudo.maskImage };
+  });
+  expect(style.background).toContain('repeating-linear-gradient');
+  expect(style.mask).toContain('repeating-linear-gradient');
+  await page.reload();
+  await page.getByRole('button', { name: 'main.py', exact: true }).click();
+  await expect(editor).toHaveAttribute('data-indent-guides', 'dotted');
+  await expect(editor).toHaveAttribute('data-indent-guide-palette', 'soft');
 });
 
 test('preserves unsaved content when closing is cancelled', async ({ page }) => {

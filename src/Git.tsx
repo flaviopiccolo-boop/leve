@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { ArrowUp, Check, ChevronDown, Ellipsis, GitBranch, Minus, Plus, RefreshCw } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, ChevronDown, Download, Ellipsis, GitBranch, Minus, Plus, RefreshCw } from 'lucide-react';
 import { fileName, native } from './workspace';
 
 const groups = [
@@ -21,13 +21,14 @@ export type GitStatus = keyof typeof gitStatuses;
 export type GitChange = { path: string; kind: typeof groups[number][0]; status: GitStatus };
 type Repository = { id: string; branch: string | null; head: string | null; canSwitch: boolean; changes: GitChange[] };
 type IndexAction = 'stage' | 'unstage';
-type RemoteAction = 'push' | 'publish';
+type RemoteAction = 'push' | 'publish' | 'fetch' | 'pull';
 type PushTarget = { remote: string; reference: string };
-type RemoteStatus = { remotes: string[]; upstream: PushTarget | null };
+type PullBranch = (repo: string, request: { branch: string; head: string; target: PushTarget }) => Promise<void>;
+type RemoteStatus = { remotes: string[]; upstream: PushTarget | null; comparison: { ahead: number; behind: number } | null };
 type GitAction = IndexAction | 'commit' | RemoteAction;
 const actionMessage: Record<GitAction, string> = {
   stage: 'Staging saved changes…', unstage: 'Unstaging changes…', commit: 'Creating commit…',
-  push: 'Pushing branch…', publish: 'Publishing branch…',
+  push: 'Pushing branch…', publish: 'Publishing branch…', fetch: 'Fetching remote…', pull: 'Pulling branch…',
 };
 const canUpdateIndex = (change: GitChange) => change.status !== 'U' && !change.path.endsWith('/');
 export type GitCommit = { id: string; subject: string; author: string; date: number };
@@ -75,11 +76,12 @@ export function useGitStatus(root: string | null, refresh: string) {
   return useGitRequest(request, refresh, true);
 }
 
-export function GitPanel({ root, refresh, onRefresh, result, onOpen, onCommit, onSwitch }: GitProps & {
+export function GitPanel({ root, refresh, onRefresh, result, onOpen, onCommit, onSwitch, onPull }: GitProps & {
   result: ReturnType<typeof useGitStatus>;
   onOpen: (change: GitChange) => void;
   onCommit: (selection: GitCommitSelection) => void;
   onSwitch: (repo: string, branch: string) => Promise<void>;
+  onPull: PullBranch;
 }) {
   const [selected, setSelected] = useState('');
   const [view, setView] = useState<'changes' | 'history'>('changes');
@@ -126,66 +128,71 @@ export function GitPanel({ root, refresh, onRefresh, result, onOpen, onCommit, o
     : repositories?.length === 0 ? <>No Git repository found. Run <code>git init</code> in the folder you want to track, then refresh Git changes.</>
     : view === 'changes' && changes?.length === 0 ? 'Working tree is clean.'
     : '';
-  return <section className="git-panel panel-scroll" aria-label="Git changes">
-    <div className="panel-heading">GIT <button className="icon-button" title="Refresh Git changes" disabled={!root} onClick={onRefresh}><RefreshCw size={14} /></button></div>
-    {root && repo && <>
-      {!!repositories && repositories.length > 1 && <label className="git-repository">Repository
-        <select value={repo.id} disabled={action !== null} onChange={event => { setSelected(event.target.value); setActionError(''); setActionsOpen(false); }}>
-          {repositories.map(item => <option key={item.id} value={item.id}>{item.id || 'Project folder'}</option>)}
-        </select>
-      </label>}
-      <BranchPicker key={repo.id} root={root} repo={repo} refresh={refresh} onSwitch={onSwitch} blocked={action !== null} />
-      {repo.canSwitch && repo.branch && repo.head && <GitRemoteActions key={JSON.stringify([repo.id, repo.branch])} root={root} repo={repo.id} branch={repo.branch} head={repo.head} refresh={refresh} blocked={indexDisabled} runAction={runAction} />}
-      <div className="git-views" role="group" aria-label="Git view">
-        <button aria-pressed={view === 'changes'} onClick={() => setView('changes')}>Changes</button>
-        <button aria-pressed={view === 'history'} onClick={() => setView('history')}>History</button>
-      </div>
-    </>}
-    {view === 'changes' && repo && <div className="git-index-actions" onKeyDown={event => {
-      if (event.key === 'Escape' && actionsOpen) { event.stopPropagation(); setActionsOpen(false); actionsTrigger.current?.focus(); }
-    }}>
-      <button ref={actionsTrigger} className="icon-button" aria-label="Staging actions" title="Staging actions" aria-expanded={actionsOpen} onClick={() => setActionsOpen(value => !value)}><Ellipsis size={16} /></button>
-      {actionsOpen && <div className="git-index-menu" role="group" aria-label="Bulk staging actions">
-        <button className="search-result" disabled={indexDisabled || !stagePaths.length} onClick={() => { setActionsOpen(false); actionsTrigger.current?.focus(); void updateIndex('stage', stagePaths); }}><Plus size={14} />Stage All</button>
-        <button className="search-result" disabled={indexDisabled || !unstagePaths.length} onClick={() => { setActionsOpen(false); actionsTrigger.current?.focus(); void updateIndex('unstage', unstagePaths); }}><Minus size={14} />Unstage All</button>
+  return <section className="git-panel panel-layout" aria-label="Git changes">
+    <div className="panel-toolbar git-toolbar">
+      <div className="panel-heading">GIT <button className="icon-button" title="Refresh Git changes" disabled={!root} onClick={onRefresh}><RefreshCw size={14} /></button></div>
+      {root && repo && <>
+        {!!repositories && repositories.length > 1 && <label className="git-repository">Repository
+          <select value={repo.id} disabled={action !== null} onChange={event => { setSelected(event.target.value); setActionError(''); setActionsOpen(false); }}>
+            {repositories.map(item => <option key={item.id} value={item.id}>{item.id || 'Project folder'}</option>)}
+          </select>
+        </label>}
+        <BranchPicker key={repo.id} root={root} repo={repo} refresh={refresh} onSwitch={onSwitch} blocked={action !== null} />
+        {repo.canSwitch && repo.branch && repo.head && <GitRemoteActions key={JSON.stringify([repo.id, repo.branch])} root={root} repo={repo.id} branch={repo.branch} head={repo.head} refresh={refresh} blocked={indexDisabled} runAction={runAction} onPull={onPull} />}
+        <div className="git-views" role="group" aria-label="Git view">
+          <button aria-pressed={view === 'changes'} onClick={() => setView('changes')}>Changes</button>
+          <button aria-pressed={view === 'history'} onClick={() => setView('history')}>History</button>
+        </div>
+      </>}
+      {view === 'changes' && repo && <div className="git-index-actions" onKeyDown={event => {
+        if (event.key === 'Escape' && actionsOpen) { event.stopPropagation(); setActionsOpen(false); actionsTrigger.current?.focus(); }
+      }}>
+        <button ref={actionsTrigger} className="icon-button" aria-label="Staging actions" title="Staging actions" aria-expanded={actionsOpen} onClick={() => setActionsOpen(value => !value)}><Ellipsis size={16} /></button>
+        {actionsOpen && <div className="git-index-menu" role="group" aria-label="Bulk staging actions">
+          <button className="search-result" disabled={indexDisabled || !stagePaths.length} onClick={() => { setActionsOpen(false); actionsTrigger.current?.focus(); void updateIndex('stage', stagePaths); }}><Plus size={14} />Stage All</button>
+          <button className="search-result" disabled={indexDisabled || !unstagePaths.length} onClick={() => { setActionsOpen(false); actionsTrigger.current?.focus(); void updateIndex('unstage', unstagePaths); }}><Minus size={14} />Unstage All</button>
+        </div>}
       </div>}
-    </div>}
-    {action && <p className="panel-description" role="status">{actionMessage[action]}</p>}
-    {actionError && <p className="panel-description inline-error" role="alert">{actionError}</p>}
-    {view === 'changes' && repo && (repo.canSwitch && repo.branch ? <form className="git-commit-form" onSubmit={event => { event.preventDefault(); void submitCommit(); }}>
-      <label>Commit message<textarea rows={3} maxLength={16_384} value={draft} disabled={action === 'commit'} onChange={event => setDraft(event.target.value)} placeholder="Describe the staged changes…" /></label>
-      <div className="git-commit-actions"><span>{hasConflicts ? 'Resolve conflicts before committing.' : `${unstagePaths.length} staged ${unstagePaths.length === 1 ? 'file' : 'files'}`}</span>
-        <button type="submit" className="button primary" disabled={commitDisabled}>Commit</button>
-      </div>
-    </form> : <p className="panel-description">{repo.canSwitch ? 'Switch to a branch to commit.' : 'Open the repository root to commit.'}</p>)}
-    {message && <p className="panel-description" role="status">{message}</p>}
-    {result?.error && <p className="panel-description inline-error" role="alert">{result.error}</p>}
-    {view === 'history' && root && repo && <GitHistory key={JSON.stringify([repo.id, repo.head])} root={root} repo={repo} refresh={refresh} onCommit={onCommit} />}
-    {view === 'changes' && groups.map(([kind, label]) => {
-      const entries = changes?.filter(change => change.kind === kind);
-      return !!entries?.length && <section key={kind} aria-label={label}>
-        <h2 className="git-group-heading">{label} <span>{entries.length}</span></h2>
-        {entries.map(change => {
-          const staged = change.kind === 'staged';
-          const label = `${staged ? 'Unstage' : 'Stage'} ${change.path}`;
-          return <div className="git-change-row" key={change.path}>
-            <button className="search-result git-change" aria-label={`View diff for ${change.path}`} title={change.path} onClick={() => onOpen(change)}>
-              <span className="git-badge" data-git-status={change.status} title={gitStatuses[change.status]?.label}>{gitStatuses[change.status]?.badge ?? change.status}</span>
-              <span>{fileName(change.path)}{fileName(change.path) !== change.path && <small>{change.path}</small>}</span>
-            </button>
-            {canUpdateIndex(change) && <button className="icon-button git-index-button" aria-label={label} title={staged ? label : `${label} (saved changes)`} disabled={indexDisabled} onClick={() => void updateIndex(staged ? 'unstage' : 'stage', [change.path])}>
-              {staged ? <Minus size={14} /> : <Plus size={14} />}
-            </button>}
-          </div>;
-        })}
-      </section>;
-    })}
+      {action && <p className="panel-description" role="status">{actionMessage[action]}</p>}
+      {actionError && <p className="panel-description inline-error" role="alert">{actionError}</p>}
+      {view === 'changes' && repo && (repo.canSwitch && repo.branch ? <form className="git-commit-form" onSubmit={event => { event.preventDefault(); void submitCommit(); }}>
+        <label>Commit message<textarea rows={3} maxLength={16_384} value={draft} disabled={action === 'commit'} onChange={event => setDraft(event.target.value)} placeholder="Describe the staged changes…" /></label>
+        <div className="git-commit-actions"><span>{hasConflicts ? 'Resolve conflicts before committing.' : `${unstagePaths.length} staged ${unstagePaths.length === 1 ? 'file' : 'files'}`}</span>
+          <button type="submit" className="button primary" disabled={commitDisabled}>Commit</button>
+        </div>
+      </form> : <p className="panel-description">{repo.canSwitch ? 'Switch to a branch to commit.' : 'Open the repository root to commit.'}</p>)}
+    </div>
+    <div className="panel-body" role="region" aria-label="Git results" tabIndex={0} key={JSON.stringify([repo?.id, repo?.branch, view, view === 'history' ? repo?.head : null])}>
+      {message && <p className="panel-description" role="status">{message}</p>}
+      {result?.error && <p className="panel-description inline-error" role="alert">{result.error}</p>}
+      {view === 'history' && root && repo && <GitHistory key={JSON.stringify([repo.id, repo.head])} root={root} repo={repo} refresh={refresh} onCommit={onCommit} />}
+      {view === 'changes' && groups.map(([kind, label]) => {
+        const entries = changes?.filter(change => change.kind === kind);
+        return !!entries?.length && <section key={kind} aria-label={label}>
+          <h2 className="git-group-heading">{label} <span>{entries.length}</span></h2>
+          {entries.map(change => {
+            const staged = change.kind === 'staged';
+            const label = `${staged ? 'Unstage' : 'Stage'} ${change.path}`;
+            return <div className="git-change-row" key={change.path}>
+              <button className="search-result git-change" aria-label={`View diff for ${change.path}`} title={change.path} onClick={() => onOpen(change)}>
+                <span className="git-badge" data-git-status={change.status} title={gitStatuses[change.status]?.label}>{gitStatuses[change.status]?.badge ?? change.status}</span>
+                <span>{fileName(change.path)}{fileName(change.path) !== change.path && <small>{change.path}</small>}</span>
+              </button>
+              {canUpdateIndex(change) && <button className="icon-button git-index-button" aria-label={label} title={staged ? label : `${label} (saved changes)`} disabled={indexDisabled} onClick={() => void updateIndex(staged ? 'unstage' : 'stage', [change.path])}>
+                {staged ? <Minus size={14} /> : <Plus size={14} />}
+              </button>}
+            </div>;
+          })}
+        </section>;
+      })}
+    </div>
   </section>;
 }
 
-function GitRemoteActions({ root, repo, branch, head, refresh, blocked, runAction }: {
+function GitRemoteActions({ root, repo, branch, head, refresh, blocked, runAction, onPull }: {
   root: string; repo: string; branch: string; head: string; refresh: string; blocked: boolean;
   runAction: (operation: RemoteAction, request: () => Promise<unknown>) => Promise<boolean>;
+  onPull: PullBranch;
 }) {
   const [selectedRemote, setSelectedRemote] = useState('');
   const [notice, setNotice] = useState('');
@@ -194,7 +201,7 @@ function GitRemoteActions({ root, repo, branch, head, refresh, blocked, runActio
   if (!result) return null;
   if (result.error) return <p className="panel-description inline-error" role="alert">{result.error}</p>;
   if (!result.data) return null;
-  const { upstream, remotes } = result.data;
+  const { upstream, remotes, comparison } = result.data;
   if (remotes.length === 0) return <p className="git-remote-hint">Add a Git remote to publish this branch.</p>;
   const prefix = 'refs/heads/';
   const remote = remotes.length === 1 ? remotes[0] : selectedRemote;
@@ -202,11 +209,19 @@ function GitRemoteActions({ root, repo, branch, head, refresh, blocked, runActio
   const publish = upstream === null;
   const destination = `${target.remote}/${target.reference.slice(prefix.length)}`;
   const available = remotes.includes(target.remote) && target.reference.startsWith(prefix);
+  const stale = blocked || result.refresh !== refresh;
   const send = async () => {
     setNotice('');
     if (await runAction(publish ? 'publish' : 'push', () => invoke('git_push', { expectedRoot: root, repo, request: { branch, head, target, publish } }))) {
       setNotice(`${publish ? 'Published to' : 'Pushed to'} ${destination}.`);
     }
+  };
+  const receive = async (operation: 'fetch' | 'pull') => {
+    setNotice('');
+    const request = operation === 'fetch'
+      ? () => invoke('git_receive', { expectedRoot: root, repo, request: { operation, remote: target.remote } })
+      : () => onPull(repo, { branch, head, target });
+    if (await runAction(operation, request)) setNotice(operation === 'fetch' ? `Fetched from ${target.remote}.` : `Checked for updates from ${destination}.`);
   };
   return <div className="git-remote-actions">
     {publish && remotes.length > 1 && <label className="git-repository">Push remote
@@ -217,9 +232,13 @@ function GitRemoteActions({ root, repo, branch, head, refresh, blocked, runActio
     </label>}
     <div className="git-remote-row">
       {available && <span title={destination}>{destination}</span>}
-      <button className="button secondary" disabled={blocked || !available || result.refresh !== refresh} onClick={() => void send()}><ArrowUp size={13} />{publish ? 'Publish Branch' : 'Push'}</button>
+      <button className="button secondary" disabled={stale || !remotes.includes(target.remote)} onClick={() => void receive('fetch')}><Download size={13} />Fetch</button>
+      {!publish && <button className="button secondary" title="Pull upstream changes (fast-forward only)" disabled={stale || !available} onClick={() => void receive('pull')}><ArrowDown size={13} />Pull</button>}
+      <button className="button secondary" disabled={stale || !available} onClick={() => void send()}><ArrowUp size={13} />{publish ? 'Publish Branch' : 'Push'}</button>
     </div>
-    {upstream && !available && <small>The upstream does not point to an available remote branch.</small>}
+    {upstream && (available ? <div className="git-upstream-status" aria-live="polite" title="Compared with the last fetched upstream reference">
+      {comparison ? (comparison.ahead || comparison.behind ? `${comparison.ahead} ahead · ${comparison.behind} behind` : 'Up to date with upstream') : 'Upstream comparison unavailable'}
+    </div> : <small>The upstream does not point to an available remote branch.</small>)}
     <small aria-live="polite">{notice}</small>
   </div>;
 }
