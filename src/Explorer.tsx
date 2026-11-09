@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
 import { ChevronDown, FilePlus2, FolderOpen, FolderPlus, MoreHorizontal, RefreshCw, X } from 'lucide-react';
-import { fileName, listFiles, native, sortEntries, type FileEntry, type FileOperation } from './workspace';
+import { fileName, listFiles, native, pickSaveFolder, sortEntries, type FileEntry, type FileOperation } from './workspace';
 import { gitStatuses, type GitDecorations } from './Git';
 import ExplorerEntryIcons from './ExplorerEntryIcons';
 import type { ExplorerPreferences } from './explorerPreferences';
@@ -185,21 +185,23 @@ export default function Explorer({ root, blocked, visible, refresh, reveal, deco
   }, [menu]);
   const entry = menu?.entry;
   const parent = entry?.path ?? '';
-  return <div className="explorer panel-scroll">
-    <div className="panel-heading"><span>PROJECT FOLDER</span><div>
+  return <div className="explorer panel-layout">
+    <div className="panel-heading panel-toolbar"><span>PROJECT FOLDER</span><div>
       <button className="icon-button" title="New file" disabled={!enabled} onClick={event => action({ kind: 'file', parent: '' }, event.currentTarget)}><FilePlus2 size={14} /></button>
       <button className="icon-button" title="New folder" disabled={!enabled} onClick={event => action({ kind: 'folder', parent: '' }, event.currentTarget)}><FolderPlus size={14} /></button>
       <button className="icon-button" title="Refresh files" onClick={onRefresh}><RefreshCw size={13} /></button>
       <button className="icon-button" title="Open folder" onClick={onFolder}><FolderOpen size={15} /></button>
     </div></div>
-    <div className="project-heading"><ChevronDown size={13} /><span>{root ? fileName(root) : 'example-project'}</span>{!root && <span className="demo-badge">DEMO</span>}</div>
-    {blocked ? <p className="panel-description">Project unavailable. Recovered files remain open.</p> : <div className="explorer-tree" data-density={preferences.density} data-indent-guides={preferences.indentGuides}
-      onKeyDown={findTreeEntry}
-      onPointerDown={() => { typeahead.current = null; }}
-      onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) typeahead.current = null; }}>
-      <Tree key={root ?? 'demo'} refresh={refresh} live={native && !!root && visible} reveal={reveal} decorations={decorations} preferences={preferences} onOpen={onOpen} onMenu={openMenu} onOperation={enabled ? action : undefined} />
-    </div>}
-    <div className="explorer-root-space" onContextMenu={event => openMenu(null, event.clientX, event.clientY)} />
+    <div className="panel-body explorer-body">
+      <div className="project-heading"><ChevronDown size={13} /><span>{root ? fileName(root) : 'example-project'}</span>{!root && <span className="demo-badge">DEMO</span>}</div>
+      {blocked ? <p className="panel-description">Project unavailable. Recovered files remain open.</p> : <div className="explorer-tree" data-density={preferences.density} data-indent-guides={preferences.indentGuides}
+        onKeyDown={findTreeEntry}
+        onPointerDown={() => { typeahead.current = null; }}
+        onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) typeahead.current = null; }}>
+        <Tree key={root ?? 'demo'} refresh={refresh} live={native && !!root && visible} reveal={reveal} decorations={decorations} preferences={preferences} onOpen={onOpen} onMenu={openMenu} onOperation={enabled ? action : undefined} />
+      </div>}
+      <div className="explorer-root-space" onContextMenu={event => openMenu(null, event.clientX, event.clientY)} />
+    </div>
     {menu && <div key={parent} ref={menuRef} className="terminal-menu file-menu" role="menu" aria-label={entry ? `Actions for ${entry.name}` : 'Project root actions'} style={{ left: menu.left, top: menu.top }} onKeyDown={event => {
       if (event.key === 'Escape') {
         event.stopPropagation();
@@ -225,27 +227,99 @@ export default function Explorer({ root, blocked, visible, refresh, reveal, deco
   </div>;
 }
 
-export function FileDialog({ operation, dirtyCount, busy, error, onCancel, onSubmit }: { operation: FileOperation; dirtyCount: number; busy: boolean; error: string; onCancel: () => void; onSubmit: (name: string) => void }) {
-  const [name, setName] = useState(operation.kind === 'rename' ? operation.entry.name : '');
+export type FileDialogOperation = FileOperation | { kind: 'saveAs' | 'saveCopyAs'; path: string };
+
+const saveExtensions = [
+  ['txt', 'Plain text'], ['md', 'Markdown'], ['py', 'Python'], ['js', 'JavaScript'],
+  ['ts', 'TypeScript'], ['json', 'JSON'], ['html', 'HTML'], ['css', 'CSS'],
+  ['xml', 'XML'], ['yaml', 'YAML'], ['csv', 'CSV'],
+] as const;
+
+export function FileDialog({ operation, root, dirtyCount, busy, error, onCancel, onSubmit }: { operation: FileDialogOperation; root: string | null; dirtyCount: number; busy: boolean; error: string; onCancel: () => void; onSubmit: (name: string) => void }) {
+  const savingAs = 'path' in operation;
+  const [name, setName] = useState(() => {
+    if (operation.kind === 'rename') return operation.entry.name;
+    if (!savingAs) return '';
+    const { path } = operation;
+    if (operation.kind === 'saveAs') return path;
+    const extension = path.lastIndexOf('.');
+    const suffix = extension > path.lastIndexOf('/') + 1 ? extension : path.length;
+    return `${path.slice(0, suffix)}-copy${path.slice(suffix)}`;
+  });
+  const [extension, setExtension] = useState('');
+  const [folders, setFolders] = useState<FileEntry[]>([]);
+  const [browsing, setBrowsing] = useState(false);
+  const [browseError, setBrowseError] = useState('');
+  const normalized = name.replaceAll('\\', '/');
+  const separator = normalized.lastIndexOf('/');
+  const folder = normalized.slice(0, separator + 1).replace(/\/$/, '');
+  const basename = normalized.slice(separator + 1);
+  useEffect(() => {
+    if (!savingAs) return;
+    let current = true;
+    setFolders([]);
+    void listFiles(folder).then(entries => {
+      if (current) setFolders(entries.filter(entry => entry.directory));
+    }).catch(() => { /* The destination can also be entered by hand. */ });
+    return () => { current = false; };
+  }, [folder, savingAs]);
+  const selectFolder = (path: string) => {
+    setBrowseError('');
+    setName(path ? `${path}/${basename}` : basename);
+  };
+  const browse = async () => {
+    if (!root) return;
+    setBrowsing(true);
+    setBrowseError('');
+    try {
+      const path = await pickSaveFolder(root, folder);
+      if (path !== null) selectFolder(path);
+    } catch (failure) {
+      setBrowseError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setBrowsing(false);
+    }
+  };
+  const changeExtension = (value: string) => {
+    setExtension(value);
+    if (!value || !basename) return;
+    const dot = basename.lastIndexOf('.');
+    const stem = dot > 0 ? basename.slice(0, dot) : basename;
+    setName(`${normalized.slice(0, separator + 1)}${stem}.${value}`);
+  };
+  const ancestors = folder ? folder.split('/').map((_, index, parts) => parts.slice(0, index + 1).join('/')) : [];
+  const disabled = busy || browsing;
   const deleting = operation.kind === 'delete';
-  const title = deleting ? 'Delete permanently' : operation.kind === 'rename' ? 'Rename' : operation.kind === 'folder' ? 'New folder' : 'New file';
+  const title = operation.kind === 'saveCopyAs' ? 'Save a Copy As' : savingAs ? 'Save As' : deleting ? 'Delete permanently' : operation.kind === 'rename' ? 'Rename' : operation.kind === 'folder' ? 'New folder' : 'New file';
   return <div className="modal-backdrop" onKeyDown={event => {
-    if (event.key === 'Escape' && !busy) { event.stopPropagation(); onCancel(); }
+    if (event.key === 'Escape' && !disabled) { event.stopPropagation(); onCancel(); }
     if (event.key === 'Tab') {
-      const controls = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button:not(:disabled), input:not(:disabled)'));
+      const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled)'));
       const first = controls[0], last = controls[controls.length - 1];
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
       else if (!controls.length) event.preventDefault();
     }
   }}>
-    <form className="settings-modal file-dialog" role="dialog" aria-modal="true" aria-label={title} onSubmit={event => { event.preventDefault(); if (!busy) onSubmit(name); }}>
-      <div className="modal-heading"><h2>{title}</h2><button type="button" className="icon-button" aria-label="Cancel file operation" disabled={busy} onClick={onCancel}><X size={18} /></button></div>
-      <p className="file-path">{'entry' in operation ? operation.entry.path : operation.parent || 'Project root'}</p>
-      {deleting ? <p>This permanently deletes this {operation.entry.directory ? 'folder and all its contents' : 'file'} from disk. This cannot be undone.{dirtyCount > 0 && ` ${dirtyCount} open file(s) have unsaved changes that will also be discarded.`}</p> : <label className="file-name-label">Name<input autoFocus required maxLength={240} value={name} disabled={busy} onFocus={event => event.target.select()} onChange={event => setName(event.target.value)} /></label>}
+    <form className="file-dialog" role="dialog" aria-modal="true" aria-label={title} onSubmit={event => { event.preventDefault(); if (!disabled) onSubmit(name); }}>
+      <div className="modal-heading"><h2>{title}</h2><button type="button" className="icon-button" aria-label="Cancel file operation" disabled={disabled} onClick={onCancel}><X size={18} /></button></div>
+      <p className="file-path">{savingAs ? 'Choose a folder and a file name inside the current project.' : 'entry' in operation ? operation.entry.path : operation.parent || 'Project root'}</p>
+      {savingAs && <div className="file-folder-row">
+        <label className="file-name-label">Save in<select value={folder} disabled={disabled} onChange={event => selectFolder(event.target.value)}>
+          <option value="">Project root</option>
+          {ancestors.map(path => <option key={path} value={path}>{path}</option>)}
+          {folders.map(entry => <option key={entry.path} value={entry.path}>{entry.path}</option>)}
+        </select></label>
+        {native && root && <button type="button" className="button" disabled={disabled} onClick={() => void browse()}><FolderOpen size={15} />Browse…</button>}
+      </div>}
+      {deleting ? <p>This permanently deletes this {operation.entry.directory ? 'folder and all its contents' : 'file'} from disk. This cannot be undone.{dirtyCount > 0 && ` ${dirtyCount} open file(s) have unsaved changes that will also be discarded.`}</p> : <label className="file-name-label">{savingAs ? 'Destination path' : 'Name'}<input autoFocus required maxLength={savingAs ? undefined : 240} value={name} disabled={disabled} onFocus={event => event.target.select()} onChange={event => { setName(event.target.value); setExtension(''); setBrowseError(''); }} /></label>}
+      {savingAs && <label className="file-name-label">Save as type<select value={extension} disabled={disabled || !basename} onChange={event => changeExtension(event.target.value)}>
+        <option value="">All files (*.*)</option>
+        {saveExtensions.map(([suffix, label]) => <option key={suffix} value={suffix}>{label} (*.{suffix})</option>)}
+      </select></label>}
       {operation.kind === 'rename' && dirtyCount > 0 && <p>Unsaved edits will be kept under the new name.</p>}
-      {error && <p className="inline-error" role="alert">{error}</p>}
-      <div className="file-dialog-actions"><button type="button" autoFocus={deleting} className="button" disabled={busy} onClick={onCancel}>Cancel</button><button className="button primary" disabled={busy || (!deleting && !name.trim())}>{busy ? 'Working…' : deleting ? 'Delete permanently' : operation.kind === 'rename' ? 'Rename' : 'Create'}</button></div>
+      {(browseError || error) && <p className="inline-error" role="alert">{browseError || error}</p>}
+      <div className="file-dialog-actions"><button type="button" autoFocus={deleting} className="button" disabled={disabled} onClick={onCancel}>Cancel</button><button className="button primary" disabled={disabled || (!deleting && !(savingAs ? basename : name).trim())}>{busy ? 'Working…' : savingAs ? 'Save' : deleting ? 'Delete permanently' : operation.kind === 'rename' ? 'Rename' : 'Create'}</button></div>
     </form>
   </div>;
 }

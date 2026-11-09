@@ -7,21 +7,27 @@ import { loadShells, previewShells, type ShellProfile } from './shells';
 import { loadSession, restoreFiles, saveSession, type Session } from './session';
 import { loadProjects, rememberProject, sameProject } from './projects';
 import { version } from '../package.json';
-import Explorer, { FileDialog } from './Explorer';
+import Explorer, { FileDialog, type FileDialogOperation } from './Explorer';
 import { loadExplorerPreferences, saveExplorerPreferences } from './explorerPreferences';
+import { indentSizes, loadEditorPreferences, saveEditorPreferences } from './editorPreferences';
+import { resolveIndentation, useEditorConfigs } from './editorConfig';
+import { applyTextChanges, convertLineEndings, lineEndingLabel, preferredLineEnding } from './lineEndings';
+import { convertEncoding, textEncoding, type TextEncoding } from './textEncoding';
 import ContentSearch from './ContentSearch';
 import ImagePreview from './ImagePreview';
 import { gitDecorations, GitCommitView, GitDiff, GitPanel, useGitStatus, type GitChange, type GitCommitSelection } from './Git';
 import WindowControls from './WindowControls';
 import Problems from './Problems';
-import SettingsDialog from './SettingsDialog';
+import SettingsDialog, { type SettingsSection } from './SettingsDialog';
 import { dockPanel, documentTabset, getTab, hiddenPanelsBorder, hidePanels, isPanelShown, navigationPanelIds, panelIds, panelTabs, restorePanelSizes, revealTab, tabsetOf, terminalTabs, terminalTabset, type PanelId } from './dockPanels';
 import { LanguageWorkspace, languageFeature, languageFeatures, languageId, type Definition, type LanguageFeature, type LanguageOptions, type Problem } from './language';
-import type { EditorJump } from './Editor';
-import { activateWorkspace, fileName, indexFiles, isImagePath, languageName, mutateEntry, native, pickWorkspace, readFile, withinEntry, writeFile, type FileEntry, type FileOperation, type OpenFile } from './workspace';
+import type { EditorHandle, EditorJump } from './Editor';
+import { activateWorkspace, fileName, indexFiles, isImagePath, languageName, mutateEntry, native, pickWorkspace, readFile, saveFileAs, withinEntry, writeFile, type FileEntry, type OpenFile } from './workspace';
 
 const LAYOUT_KEY = 'leve.layout.v1';
 const LANGUAGE_KEY = 'leve.language-projects.v1';
+const titleMenuNames = ['File', 'Edit', 'View', 'Settings'] as const;
+const hasUnsavedText = (file: OpenFile) => !file.image && file.content !== file.saved;
 const workspaceMenuClassName = (name: string) => `${name} ${name.replace('flexlayout__', 'workspace-menu-')}`;
 type LanguagePreference = { path: string; options: LanguageOptions };
 const defaultLanguageOptions: LanguageOptions = { python: false, typescript: false, javascript: false, eslint: false };
@@ -118,7 +124,7 @@ export default function App() {
   const [root, setRoot] = useState<string | null>(null);
   const [enabledLanguageProjects, setEnabledLanguageProjects] = useState(languageProjects);
   const [problemsByFile, setProblemsByFile] = useState<Record<string, Problem[]>>({});
-  const [fileOperation, setFileOperation] = useState<FileOperation | null>(null);
+  const [fileOperation, setFileOperation] = useState<FileDialogOperation | null>(null);
   const fileOperationFocus = useRef<HTMLElement | null>(null);
   const [fileError, setFileError] = useState('');
   const [fileBusy, setFileBusy] = useState(false);
@@ -128,16 +134,21 @@ export default function App() {
   const filesRef = useRef(files); filesRef.current = files;
   const [refresh, setRefresh] = useState(0);
   const [gitRevision, setGitRevision] = useState(0);
-  const [switchingBranch, setSwitchingBranch] = useState(false);
+  const [branchOperation, setBranchOperation] = useState<'switch' | 'pull' | null>(null);
+  const switchingBranch = branchOperation !== null;
   const branchBusy = useRef(false);
   const [bufferVersions, setBufferVersions] = useState<Record<string, number>>({});
-  const [notice, setNotice] = useState('');
-  const [settings, setSettings] = useState(false);
+  const [notice, setNotice] = useState<{ message: string; persistent: boolean } | null>(null);
+  const [settings, setSettings] = useState<SettingsSection | null>(null);
   const [explorerPreferences, setExplorerPreferences] = useState(loadExplorerPreferences);
   useEffect(() => saveExplorerPreferences(explorerPreferences), [explorerPreferences]);
+  const [editorPreferences, setEditorPreferences] = useState(loadEditorPreferences);
+  useEffect(() => saveEditorPreferences(editorPreferences), [editorPreferences]);
   const [projects, setProjects] = useState(loadProjects);
   const [projectMenu, setProjectMenu] = useState(false);
-  const [titleMenu, setTitleMenu] = useState<{ name: 'File' | 'View'; origin: HTMLButtonElement } | null>(null);
+  const [titleMenu, setTitleMenu] = useState<{ name: (typeof titleMenuNames)[number]; origin: HTMLButtonElement } | null>(null);
+  const activeEditor = useRef<EditorHandle | null>(null);
+  const [encodingMenu, setEncodingMenu] = useState<{ path: string; origin: HTMLButtonElement } | null>(null);
   const appShell = useRef<HTMLDivElement>(null);
   const [switchingProject, setSwitchingProject] = useState(false);
   const projectPicker = useRef<HTMLButtonElement>(null);
@@ -151,7 +162,11 @@ export default function App() {
   const [jump, setJump] = useState<EditorJump | null>(null);
   const [position, setPosition] = useState({ line: 1, col: 1 });
   const [activeFile, setActiveFile] = useState('');
-  const activeImage = Object.hasOwn(files, activeFile) && files[activeFile].image === true;
+  const activeDocument = Object.hasOwn(files, activeFile) ? files[activeFile] : undefined;
+  const activeImage = activeDocument?.image === true;
+  const activeContent = activeDocument?.content ?? '';
+  const activeLineEnding = activeDocument?.lineEnding;
+  const lineEndings = useMemo(() => lineEndingLabel(activeContent, activeLineEnding), [activeContent, activeLineEnding]);
   const [sessionReady, setSessionReady] = useState(false);
   const [recoveryBlocked, setRecoveryBlocked] = useState('');
   const [recoveryWarning, setRecoveryWarning] = useState('');
@@ -168,8 +183,11 @@ export default function App() {
   const generation = useRef(0);
   const fileIndex = useRef<Promise<FileEntry[]> | null>(null);
 
-  const notify = useCallback((message: string) => setNotice(message), []);
+  const notify = useCallback((message: string, persistent = false) => setNotice({ message, persistent }), []);
   const localRoot = native && root && !recoveryBlocked ? root : null;
+  const editorConfigs = useEditorConfigs(editorPreferences.useEditorConfig ? localRoot : null, JSON.stringify(Object.values(files).filter(file => !file.image).map(file => file.path)), `${refresh}:${gitRevision}`);
+  const activeIndentation = resolveIndentation(editorPreferences, editorConfigs?.get(activeFile));
+  const automaticIndentationLabel = `Auto · ${activeIndentation.indentStyle === 'tabs' ? 'Tabs' : 'Spaces'}: ${activeIndentation.indentSize}`;
   const refreshGit = useCallback(() => setGitRevision(value => value + 1), []);
   const gitProps = {
     root: localRoot,
@@ -276,7 +294,7 @@ export default function App() {
     void loadShells().then(items => { if (active) setProfiles(items); }).catch(error => { if (active) notify(`Could not detect shells: ${String(error)}`); });
     return () => { active = false; };
   }, [notify]);
-  useEffect(() => { if (notice) { const timer = setTimeout(() => setNotice(''), 6500); return () => clearTimeout(timer); } }, [notice]);
+  useEffect(() => { if (notice && !notice.persistent) { const timer = setTimeout(() => setNotice(null), 6500); return () => clearTimeout(timer); } }, [notice]);
 
   const persist = (current: Model) => {
     try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(current.toJson())); } catch { /* Storage can be unavailable in private mode. */ }
@@ -323,36 +341,136 @@ export default function App() {
   };
   const showPanel = (id: PanelId) => dockPanel(model, getTab(model, id) ?? panelTabs[id]);
 
-  const saveFile = useCallback(async (path: string) => {
+  const persistFile = useCallback(async (file: OpenFile, content: string, encoding?: TextEncoding) => {
+    const currentGeneration = generation.current;
+    await writeFile({ ...file, content });
+    if (generation.current !== currentGeneration) return false;
+    setFiles(previous => {
+      if (!Object.hasOwn(previous, file.path)) return previous;
+      const current = previous[file.path];
+      const currentContent = encoding ? convertEncoding(current.content, encoding) ?? current.content : current.content;
+      return { ...previous, [file.path]: { ...current, saved: content, content: currentContent } };
+    });
+    return true;
+  }, []);
+
+  const saveFile = useCallback(async (path: string, encoding?: TextEncoding) => {
     if (fileBusyRef.current) return;
     if (recoveryBlocked) { notify('Reopen the original project before saving recovered changes to disk.'); return; }
     const file = filesRef.current[path];
-    if (!file || file.image || file.content === file.saved || saving.current.has(path)) return;
+    if (!file || file.image || saving.current.has(path)) return;
+    const content = encoding ? convertEncoding(file.content, encoding) : file.content;
+    if (content === null) { notify('This file starts with a U+FEFF character that requires a BOM to preserve it.'); return; }
+    if (content === file.saved && content === file.content) return;
     saving.current.add(path);
-    const currentGeneration = generation.current;
     try {
-      await writeFile(file);
-      if (generation.current !== currentGeneration) return;
-      setFiles(previous => previous[path] ? ({ ...previous, [path]: { ...previous[path], saved: file.content } }) : previous);
+      if (!await persistFile(file, content, encoding)) return;
       refreshGit();
       notify(root ? `${file.name} saved.` : `${file.name} saved only in this demo session.`);
     } catch (error) { notify(`Could not save file: ${String(error)}`); }
     finally { saving.current.delete(path); }
-  }, [notify, root, recoveryBlocked, refreshGit]);
+  }, [notify, root, recoveryBlocked, refreshGit, persistFile]);
 
-  const switchBranch = async (repo: string, branch: string) => {
+  const canSaveAll = !fileBusy && !switchingProject && !closing && !recoveryBlocked && Object.values(files).some(hasUnsavedText);
+  const saveAll = async () => {
+    if (fileBusyRef.current || switchingProject || closing || recoveryBlocked) return;
+    if (saving.current.size) { notify('Wait for the current save to finish, then try Save All again.'); return; }
+    const pending = Object.values(filesRef.current).filter(hasUnsavedText);
+    if (!pending.length) return;
+    fileBusyRef.current = true;
+    setFileBusy(true);
+    const failures: string[] = [];
+    let saved = 0;
+    try {
+      for (const file of pending) {
+        try { if (await persistFile(file, file.content)) saved++; }
+        catch (error) { failures.push(`${file.path} — ${error instanceof Error ? error.message : String(error)}`); }
+      }
+      if (saved) refreshGit();
+      const summary = `Saved ${saved} ${saved === 1 ? 'file' : 'files'}${root ? '.' : ' in this demo session.'}`;
+      notify(failures.length ? `${summary}\nCould not save ${failures.length} ${failures.length === 1 ? 'file' : 'files'}.\n${failures.join('\n')}` : summary, failures.length > 0);
+    } finally { fileBusyRef.current = false; setFileBusy(false); }
+  };
+
+  const reopenTextFile = async (path: string) => {
+    const file = Object.hasOwn(filesRef.current, path) ? filesRef.current[path] : undefined;
+    if (!file || file.image || fileBusyRef.current || saving.current.has(path) || recoveryBlocked || switchingProject || closing) return;
+    fileBusyRef.current = true;
+    setFileBusy(true);
+    try {
+      if (file.content !== file.saved) {
+        const message = `Discard unsaved changes and reopen ${file.name}?`;
+        if (!(native ? await confirmDialog(message, { title: 'Reopen file', kind: 'warning' }) : window.confirm(message))) return;
+      }
+      const content = await readFile(path);
+      if (filesRef.current[path] !== file) throw new Error('The open file changed. Try again.');
+      const updated = { ...filesRef.current, [path]: { ...file, content, saved: content, lineEnding: undefined } };
+      filesRef.current = updated;
+      setFiles(updated);
+      setBufferVersions(previous => ({ ...previous, [path]: (previous[path] ?? 0) + 1 }));
+      setJump(null);
+      refreshGit();
+      notify(`${file.name} reopened as ${textEncoding(content)}.`);
+    } catch (error) { notify(`Could not reopen file: ${String(error)}`); }
+    finally { fileBusyRef.current = false; setFileBusy(false); }
+  };
+
+  const canSaveAs = !!activeFile && !activeImage && !recoveryBlocked && !switchingProject && !closing;
+  const openSaveAs = (path = activeFile, kind: 'saveAs' | 'saveCopyAs' = 'saveAs') => {
+    const file = Object.hasOwn(filesRef.current, path) ? filesRef.current[path] : undefined;
+    if (!file || file.image || recoveryBlocked || switchingProject || closing || fileOperation || fileBusyRef.current) return;
+    fileOperationFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setFileError('');
+    setFileOperation({ kind, path });
+  };
+
+  const applySaveAs = async (source: string, target: string, copy: boolean) => {
+    const file = Object.hasOwn(filesRef.current, source) ? filesRef.current[source] : undefined;
+    const tab = fileTab(model, source);
+    if (!file || file.image || !tab) throw new Error('The source file is no longer open.');
+    if (isImagePath(target)) throw new Error('Choose a text file extension.');
+    if (Object.keys(filesRef.current).some(path => path.toLowerCase() === target.toLowerCase())) {
+      throw new Error('Choose a destination that is not already open.');
+    }
+    const result = await saveFileAs(target, file.content, root);
+    if (result.status === 'exists') {
+      const message = `Replace ${target}?`;
+      const accepted = native ? await confirmDialog(message, { title: 'Replace file', kind: 'warning' }) : window.confirm(message);
+      if (!accepted) return;
+      await saveFileAs(target, file.content, root, result.expected);
+    }
+    setRefresh(value => value + 1);
+    setFileOperation(null);
+    if (copy) {
+      notify(`Copy saved as ${target}${root ? '.' : ' in this demo session.'}`);
+      requestAnimationFrame(() => fileOperationFocus.current?.focus());
+      return;
+    }
+    const name = fileName(target);
+    const updated = { ...filesRef.current, [target]: { ...file, path: target, name, saved: file.content } };
+    delete updated[source];
+    filesRef.current = updated;
+    setFiles(updated);
+    model.doAction(Actions.updateNodeAttributes(tab.getId(), { name, config: { path: target } }));
+    setActiveFile(target);
+    setJump(null);
+    setReveal(target);
+    notify(`${name} saved${root ? '.' : ' only in this demo session.'}`);
+  };
+
+  const updateGitWorktree = async (repo: string, operation: 'switch' | 'pull', run: (root: string) => Promise<unknown>) => {
     if (!localRoot || switchingProject || closing || fileBusyRef.current || saving.current.size || opening.current.size) {
       throw new Error('Wait for pending project or file operations to finish, then try again.');
     }
     if (Object.values(filesRef.current).some(file => file.content !== file.saved)) {
-      throw new Error('Save your open edits before switching branches.');
+      throw new Error(operation === 'pull' ? 'Save your open edits before pulling.' : 'Save your open edits before switching branches.');
     }
     fileBusyRef.current = true;
     branchBusy.current = true;
-    setSwitchingBranch(true);
+    setBranchOperation(operation);
     try {
       try {
-        await invoke('git_switch', { expectedRoot: localRoot, repo, branch });
+        await run(localRoot);
       } finally {
         // A Git hook may fail after the working tree has already changed.
         const affected = Object.values(filesRef.current).filter(file => !repo || withinEntry(file.path, repo));
@@ -371,7 +489,7 @@ export default function App() {
             delete updated[file.path];
             closed.push(file.path);
           } else if (file.image || content !== file.content) {
-            updated[file.path] = { ...current, content, saved: content };
+            updated[file.path] = { ...current, content, saved: content, lineEnding: undefined };
             remount.push(file.path);
           }
         }
@@ -390,7 +508,7 @@ export default function App() {
     } finally {
       branchBusy.current = false;
       fileBusyRef.current = false;
-      setSwitchingBranch(false);
+      setBranchOperation(null);
     }
   };
 
@@ -399,6 +517,10 @@ export default function App() {
     if (saving.current.size || opening.current.size) { setFileError('Wait for pending file operations to finish, then try again.'); return; }
     fileBusyRef.current = true; setFileBusy(true); setFileError('');
     try {
+      if ('path' in fileOperation) {
+        await applySaveAs(fileOperation.path, name.replaceAll('\\', '/'), fileOperation.kind === 'saveCopyAs');
+        return;
+      }
       const target = await mutateEntry(fileOperation, name, root);
       generation.current += 1;
       if ('entry' in fileOperation) {
@@ -508,7 +630,7 @@ export default function App() {
     void import('@tauri-apps/api/window').then(async ({ getCurrentWindow }) => {
       const stop = await getCurrentWindow().onCloseRequested(async event => {
         event.preventDefault();
-        if (branchBusy.current) return;
+        if (fileBusyRef.current) return;
         setClosing(true);
         if (await checkpoint() || await confirmDialog('Recovery could not be saved. Close anyway? Unsaved changes may be lost.', { title: 'Recovery unavailable', kind: 'warning' })) await getCurrentWindow().destroy();
         else setClosing(false);
@@ -520,10 +642,15 @@ export default function App() {
 
   useEffect(() => {
     const handle = (event: KeyboardEvent) => {
-      if (settings || branchBusy.current) return;
+      if (settings || fileOperation || branchBusy.current) return;
       if (event.key === 'Escape') { setTerminalMenu(null); setProjectMenu(false); if (projectMenu) projectPicker.current?.focus(); }
       if (!(event.ctrlKey || event.metaKey)) return;
-      if (event.key.toLowerCase() === 's') { event.preventDefault(); if (activeFile && !activeImage) void saveFile(activeFile); }
+      if (event.key.toLowerCase() === 's') {
+        if (event.altKey) return;
+        event.preventDefault();
+        if (event.shiftKey) openSaveAs();
+        else if (activeFile && !activeImage) void saveFile(activeFile);
+      }
       if (event.key.toLowerCase() === 'p') {
         setSearchMode('files');
         event.preventDefault(); showPanel('search');
@@ -539,13 +666,24 @@ export default function App() {
       }
       if (event.key === '`') { event.preventDefault(); addTerminal(); }
     };
+    const handleSaveAll = (event: KeyboardEvent) => {
+      if (settings || fileOperation || !(event.ctrlKey || event.metaKey) || !event.altKey || event.shiftKey || event.getModifierState('AltGraph') || event.key.toLowerCase() !== 's') return;
+      event.preventDefault();
+      event.stopPropagation();
+      void saveAll();
+    };
+    window.addEventListener('keydown', handleSaveAll, true);
     window.addEventListener('keydown', handle);
-    return () => window.removeEventListener('keydown', handle);
+    return () => {
+      window.removeEventListener('keydown', handleSaveAll, true);
+      window.removeEventListener('keydown', handle);
+    };
   });
 
   const onAction = (action: Action) => {
     if (branchBusy.current) return undefined;
     if (action.type !== Actions.DELETE_TAB) return action;
+    if (fileBusyRef.current) return undefined;
     const tab = model.getNodeById(action.data.node);
     if (!(tab instanceof TabNode) || !tab.isCloseable()) return undefined;
     const path = tab.getConfig()?.path;
@@ -592,15 +730,28 @@ export default function App() {
         setFileOperation(operation);
         setFileError('');
       }} />;
-      case 'search': return <div className="search-panel panel-scroll"><div className="panel-heading">SEARCH</div>
-        <div className="search-modes" role="tablist" aria-label="Search mode"><button role="tab" aria-selected={searchMode === 'files'} onClick={() => setSearchMode('files')}>Files</button><button role="tab" aria-selected={searchMode === 'contents'} onClick={() => setSearchMode('contents')}>Contents</button></div>
-        {searchMode === 'contents' ? <ContentSearch root={root} blocked={!!recoveryBlocked || (native && !root)} refresh={refresh} onOpen={match => { void openFile(match.path).then(() => setJump({ ...match, token: crypto.randomUUID() })); }} /> : <>
-        <label className="search-input"><Search size={14} /><input id="file-search" value={query} onChange={event => setQuery(event.target.value)} placeholder="File name or path" /></label>
-        <p className="panel-description">{searching ? 'Searching…' : query ? `${matches.length} result(s)` : 'Find files in your project. Use Ctrl+F to search within the code.'}</p>
-        {matches.map(entry => <button className="search-result" key={entry.path} onClick={() => void openFile(entry.path)}><FileCode2 size={14} /><span>{entry.name}<small>{entry.path}</small></span></button>)}
-        {query && <p className="panel-description">Up to 5,000 files · skips dependencies and build folders.</p>}
-      </>}</div>;
-      case 'git': return <GitPanel key={localRoot} {...gitProps} result={gitResult} onSwitch={switchBranch}
+      case 'search': {
+        const heading = <>
+          <div className="panel-heading">SEARCH</div>
+          <div className="search-modes" role="tablist" aria-label="Search mode"><button role="tab" aria-selected={searchMode === 'files'} onClick={() => setSearchMode('files')}>Files</button><button role="tab" aria-selected={searchMode === 'contents'} onClick={() => setSearchMode('contents')}>Contents</button></div>
+        </>;
+        return <div className="search-panel panel-layout">
+          {searchMode === 'contents' ? <ContentSearch heading={heading} root={root} blocked={!!recoveryBlocked || (native && !root)} refresh={refresh} onOpen={match => { void openFile(match.path).then(() => setJump({ ...match, token: crypto.randomUUID() })); }} /> : <>
+            <div className="panel-toolbar search-tools">
+              {heading}
+              <label className="search-input"><Search size={14} /><input id="file-search" value={query} onChange={event => setQuery(event.target.value)} placeholder="File name or path" /></label>
+            </div>
+            <div className="panel-body">
+              <p className="panel-description">{searching ? 'Searching…' : query ? `${matches.length} result(s)` : 'Find files in your project. Use Ctrl+F to search within the code.'}</p>
+              {matches.map(entry => <button className="search-result" key={entry.path} onClick={() => void openFile(entry.path)}><FileCode2 size={14} /><span>{entry.name}<small>{entry.path}</small></span></button>)}
+              {query && <p className="panel-description">Up to 5,000 files · skips dependencies and build folders.</p>}
+            </div>
+          </>}
+        </div>;
+      }
+      case 'git': return <GitPanel key={localRoot} {...gitProps} result={gitResult}
+        onSwitch={(repo, branch) => updateGitWorktree(repo, 'switch', expectedRoot => invoke('git_switch', { expectedRoot, repo, branch }))}
+        onPull={(repo, request) => updateGitWorktree(repo, 'pull', expectedRoot => invoke('git_receive', { expectedRoot, repo, request: { operation: 'pull', ...request } }))}
         onOpen={change => openGitView(`${fileName(change.path)} (Git diff)`, { change })}
         onCommit={selection => openGitView(`${selection.commit.id.slice(0, 7)} (Git commit)`, { selection })} />;
       case 'git-diff': {
@@ -618,14 +769,20 @@ export default function App() {
           ? <p className="panel-description">Reopen the project to preview this image.</p>
           : <ImagePreview key={bufferKey} path={file.path} name={file.name} root={root} />;
         const feature = languageFeature(languageId(file.path));
-        return <Suspense fallback={<p className="panel-description">Loading editor…</p>}><Editor key={bufferKey} file={file} jump={jump?.path === file.path ? jump : null}
-          active={activeFile === file.path} languageWorkspace={languageWorkspace}
+        return <Suspense fallback={<p className="panel-description">Loading editor…</p>}><Editor key={bufferKey} ref={activeFile === file.path ? activeEditor : undefined} file={file} jump={jump?.path === file.path ? jump : null}
+          active={activeFile === file.path} preferences={{ ...editorPreferences, ...(file.indentation ?? resolveIndentation(editorPreferences, editorConfigs?.get(file.path))) }} languageWorkspace={languageWorkspace}
           lspEnabled={!!feature && languageOptions[feature]}
           lintEnabled={languageOptions.eslint && (feature === 'typescript' || feature === 'javascript')}
           onProblems={reportProblems} onDefinition={goToDefinition} onLanguageError={notify}
           onJumpError={() => notify('This search result no longer matches the open file. Save or reopen the file, then search again.')}
-          onChange={(path, content) => setFiles(previous => ({ ...previous, [path]: { ...previous[path], content } }))}
-          onSave={path => void saveFile(path)} onCursor={(line, col) => setPosition({ line, col })} /></Suspense>;
+          onChange={(path, changes) => setFiles(previous => {
+            if (!Object.hasOwn(previous, path)) return previous;
+            const file = previous[path];
+            const lineEnding = file.lineEnding ?? preferredLineEnding(file.content);
+            const content = applyTextChanges(file.content, changes, lineEnding);
+            return { ...previous, [path]: { ...file, content, lineEnding } };
+          })}
+          onSave={path => void saveFile(path)} onSaveAs={openSaveAs} onCursor={(line, col) => setPosition({ line, col })} /></Suspense>;
       }
       case 'problems': return <Problems key={problemsFile} file={problemsFile} problems={problems} onCopyStatus={notify} onOpen={problem => {
         void openLocation(problem.path, problem.line, problem.column);
@@ -693,22 +850,32 @@ export default function App() {
   return <div ref={appShell} className="app-shell" onContextMenuCapture={event => event.preventDefault()}>
     <header className={native ? 'titlebar desktop-titlebar' : 'titlebar'} inert={switchingBranch} data-tauri-drag-region={native ? '' : undefined}>
       <div className="titlebar-start" data-tauri-drag-region={native ? '' : undefined}>
-        <div className="app-name"><Code2 size={18} /><strong>leve</strong><span className="preview-tag">{native ? `v${version}` : 'preview'}</span></div>
+        <div className="app-name"><Code2 size={16} aria-hidden="true" /><strong>leve</strong></div>
         <nav className="titlebar-menus" aria-label="Application menus" data-tauri-drag-region="false">
-          <button className="sidebar-toggle" data-tauri-drag-region="false" type="button"
-            aria-label={sidebarShown ? 'Hide sidebar' : 'Show sidebar'} title={sidebarShown ? 'Hide sidebar' : 'Show sidebar'}
-            aria-expanded={sidebarShown} onClick={toggleSidebar}>
-            {sidebarShown ? <PanelLeftClose size={16} /> : <PanelLeft size={16} />}
-          </button>
-          {(['File', 'View'] as const).map(name => <button key={name} data-tauri-drag-region="false" aria-haspopup="menu" aria-expanded={titleMenu?.name === name} onClick={event => {
-            const origin = event.currentTarget;
-            setTitleMenu(current => current?.name === name ? null : { name, origin });
-          }}>{name}</button>)}
+          {titleMenuNames.map(name => <button key={name} data-tauri-drag-region="false" aria-label={name === 'Settings' ? 'Settings menu' : undefined} aria-haspopup="menu" aria-expanded={titleMenu?.name === name}
+            onPointerEnter={event => {
+              if (event.pointerType !== 'mouse') return;
+              const origin = event.currentTarget;
+              setTitleMenu(current => current && current.name !== name ? { name, origin } : current);
+            }}
+            onPointerDown={event => {
+              // Let the trigger handle this click before PopupMenu dismisses outside presses.
+              if (titleMenu) event.stopPropagation();
+            }}
+            onClick={event => {
+              const origin = event.currentTarget;
+              setTitleMenu(current => current?.name === name ? null : { name, origin });
+            }}>{name}</button>)}
         </nav>
+        <button className="sidebar-toggle" data-tauri-drag-region="false" type="button"
+          aria-label={sidebarShown ? 'Hide sidebar' : 'Show sidebar'} title={sidebarShown ? 'Hide sidebar' : 'Show sidebar'}
+          aria-expanded={sidebarShown} onClick={toggleSidebar}>
+          {sidebarShown ? <PanelLeftClose size={16} /> : <PanelLeft size={16} />}
+        </button>
       </div>
       <button ref={projectPicker} className="project-picker" data-tauri-drag-region="false" title={root || 'Switch project'} aria-haspopup="menu" aria-expanded={projectMenu} aria-controls={projectMenu ? 'project-menu' : undefined} disabled={switchingProject} onClick={() => setProjectMenu(value => !value)}><Folder size={13} /><span>{root ? fileName(root) : 'No folder open'}</span><ChevronDown size={12} /></button>
       <div className="titlebar-actions" data-tauri-drag-region="false">
-        <button className="icon-button" title="Open settings" onClick={() => setSettings(true)}><Settings2 size={16} /></button>
+        <button className="icon-button" title="Open settings" onClick={() => setSettings('appearance')}><Settings2 size={16} /></button>
         {native && <WindowControls report={notify} />}
       </div>
     </header>
@@ -726,7 +893,7 @@ export default function App() {
       <button title="Find files (Ctrl+P)" className="activity-button" aria-pressed={navigationSelected('search')} onClick={() => { showPanel('search'); setTimeout(() => document.getElementById('file-search')?.focus(), 0); }}><Search size={19} /></button>
       <button title="Git changes" className="activity-button" aria-pressed={gitSelected} onClick={() => showPanel('git')}><GitBranch size={19} /></button>
       <button title="New terminal" className="activity-button" onClick={openTerminalMenu}><TerminalSquare size={21} /></button>
-      <div className="activity-spacer" /><button title="Settings" className="activity-button" onClick={() => setSettings(true)}><Settings2 size={21} /></button>
+      <div className="activity-spacer" /><button title="Settings" className="activity-button" onClick={() => setSettings('appearance')}><Settings2 size={21} /></button>
     </aside><main className="layout-host" onMouseDownCapture={event => {
       if (event.button === 1 && event.target instanceof Element && event.target.closest('[role="tab"]')) event.preventDefault();
     }}><Layout model={model} factory={factory} onAction={onAction}
@@ -767,6 +934,7 @@ export default function App() {
       />}
     </main></div>
     {titleMenu && appShell.current && <PopupMenu
+      key={titleMenu.name}
       anchor={{ x: titleMenu.origin.getBoundingClientRect().left, y: titleMenu.origin.getBoundingClientRect().bottom }}
       container={appShell.current} returnFocusTo={titleMenu.origin} title={titleMenu.name}
       classNameMapper={workspaceMenuClassName}
@@ -776,6 +944,16 @@ export default function App() {
         { key: 'recent', label: 'Recent projects…', icon: <Folder size={14} />, onSelect: () => requestAnimationFrame(() => setProjectMenu(true)) },
         { type: 'divider', key: 'files' },
         { key: 'save', label: 'Save file', disabled: !activeFile || activeImage, onSelect: () => void saveFile(activeFile) },
+        { key: 'save-all', label: 'Save All', disabled: !canSaveAll, onSelect: () => void saveAll() },
+        { key: 'save-as', label: 'Save As…', disabled: !canSaveAs, onSelect: () => openSaveAs() },
+        { key: 'save-copy-as', label: 'Save a Copy As…', disabled: !canSaveAs, onSelect: () => openSaveAs(activeFile, 'saveCopyAs') },
+      ] : titleMenu.name === 'Edit' ? [
+        { key: 'indent-spaces', label: 'Convert Indentation to Spaces', disabled: !activeDocument || activeImage || fileBusy, onSelect: () => activeEditor.current?.convertIndentation('spaces') },
+        { key: 'indent-tabs', label: 'Convert Indentation to Tabs', disabled: !activeDocument || activeImage || fileBusy, onSelect: () => activeEditor.current?.convertIndentation('tabs') },
+      ] : titleMenu.name === 'Settings' ? [
+        { key: 'settings', label: 'Open Settings…', icon: <Settings2 size={14} />, onSelect: () => requestAnimationFrame(() => setSettings('appearance')) },
+        { key: 'editor-settings', label: 'Editor Settings…', onSelect: () => requestAnimationFrame(() => setSettings('editor')) },
+        { key: 'shortcuts', label: 'Keyboard Shortcuts…', onSelect: () => requestAnimationFrame(() => setSettings('shortcuts')) },
       ] : [
         { key: 'restore', label: 'Restore workspace', icon: <LayoutTemplate size={14} />, onSelect: restoreWorkspace },
         { type: 'divider', key: 'panels' },
@@ -786,10 +964,55 @@ export default function App() {
         { key: 'terminal', label: `${terminalShown ? 'Hide' : 'Show'} Terminal`, icon: <Check size={14} visibility={terminalShown ? 'visible' : 'hidden'} />, onSelect: () => toggleTerminal(titleMenu.origin) },
       ]}
     />}
-    <footer className="statusbar"><span className="status-indicator" />{native ? 'Local' : 'Web preview'}<span className="status-divider" /><span>{root ? fileName(root) : 'Demo project'}</span><div className="status-spacer" /><span title={checkpointTime ? `Last recovery checkpoint: ${checkpointTime}` : 'Preparing recovery'}>{recoveryError || recoveryLocked ? 'Recovery unavailable' : checkpointTime ? 'Recovery saved' : 'Recovery pending'}</span>{activeImage ? <span>Image · Read-only</span> : <><span>Ln {position.line}, Col {position.col}</span><span>UTF-8</span><span>{activeFile ? languageName(activeFile) : 'Leve'}</span></>}</footer>
-    {(!sessionReady || closing || switchingBranch) && <div className="session-loading" role="status">{switchingBranch ? 'Switching branch…' : closing ? 'Saving session…' : 'Restoring session…'}</div>}
-    {notice && <div className="toast" role="status"><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={15} /></button></div>}
-    {fileOperation && <FileDialog key={JSON.stringify(fileOperation)} operation={fileOperation} dirtyCount={'entry' in fileOperation ? Object.values(files).filter(file => withinEntry(file.path, fileOperation.entry.path) && file.content !== file.saved).length : 0} busy={fileBusy} error={fileError} onCancel={() => {
+    <footer className="statusbar"><span className="status-indicator" />{native ? 'Local' : 'Web preview'}<span className="status-divider" /><span>{root ? fileName(root) : 'Demo project'}</span><div className="status-spacer" /><span title={checkpointTime ? `Last recovery checkpoint: ${checkpointTime}` : 'Preparing recovery'}>{recoveryError || recoveryLocked ? 'Recovery unavailable' : checkpointTime ? 'Recovery saved' : 'Recovery pending'}</span>{activeImage ? <span>Image · Read-only</span> : <>
+      <span>Ln {position.line}, Col {position.col}</span>
+      {activeDocument && <select className="status-select status-indentation" aria-label="File indentation" title="Change indentation for this tab" value={activeDocument.indentation ? `${activeDocument.indentation.indentStyle}:${activeDocument.indentation.indentSize}` : 'auto'} onChange={event => {
+        const [style, value] = event.target.value.split(':');
+        const size = Number(value);
+        const indentation: OpenFile['indentation'] = (style === 'spaces' || style === 'tabs') && indentSizes.some(option => option === size)
+          ? { indentStyle: style, indentSize: size, tabWidth: size } : undefined;
+        setFiles(previous => {
+          const file = previous[activeFile];
+          if (!file) return previous;
+          return { ...previous, [activeFile]: { ...file, indentation } };
+        });
+      }}>
+        <option value="auto">{automaticIndentationLabel}</option>
+        {indentSizes.map(size => <option key={`spaces:${size}`} value={`spaces:${size}`}>Spaces: {size}</option>)}
+        {indentSizes.map(size => <option key={`tabs:${size}`} value={`tabs:${size}`}>Tabs: {size}</option>)}
+      </select>}
+      {activeDocument && <button className="status-select status-encoding" aria-label={`File encoding: ${textEncoding(activeContent)}`} aria-haspopup="menu" aria-expanded={encodingMenu?.path === activeFile} disabled={fileBusy || switchingBranch || switchingProject || closing || !!recoveryBlocked} onClick={event => {
+        const origin = event.currentTarget;
+        setEncodingMenu(current => current ? null : { path: activeFile, origin });
+      }}>{textEncoding(activeContent)}</button>}
+      {activeDocument && <select className="status-select" aria-label="Line endings" title="Change line endings for this file" value={lineEndings} disabled={fileBusy || switchingBranch || !!recoveryBlocked} onChange={event => {
+        const lineEnding = event.target.value;
+        if (lineEnding !== 'LF' && lineEnding !== 'CRLF') return;
+        setFiles(previous => {
+          if (!Object.hasOwn(previous, activeFile)) return previous;
+          const file = previous[activeFile];
+          return { ...previous, [activeFile]: { ...file, lineEnding, content: convertLineEndings(file.content, lineEnding) } };
+        });
+      }}>
+        {lineEndings !== 'LF' && lineEndings !== 'CRLF' && <option value={lineEndings} disabled>{lineEndings}</option>}
+        <option value="LF">LF</option><option value="CRLF">CRLF</option>
+      </select>}
+      <span>{activeFile ? languageName(activeFile) : 'Leve'}</span>
+    </>}</footer>
+    {encodingMenu?.path === activeFile && appShell.current && <PopupMenu
+      anchor={{ x: encodingMenu.origin.getBoundingClientRect().left, y: encodingMenu.origin.getBoundingClientRect().top }}
+      container={appShell.current} returnFocusTo={encodingMenu.origin} title="File encoding"
+      classNameMapper={workspaceMenuClassName} onClose={() => setEncodingMenu(null)}
+      items={[
+        { key: 'reopen', label: 'Reopen from disk', onSelect: () => void reopenTextFile(encodingMenu.path) },
+        { type: 'divider', key: 'encoding-options' },
+        { key: 'utf8', label: 'Save as UTF-8', onSelect: () => void saveFile(encodingMenu.path, 'UTF-8') },
+        { key: 'utf8-bom', label: 'Save as UTF-8 with BOM', onSelect: () => void saveFile(encodingMenu.path, 'UTF-8 with BOM') },
+      ]}
+    />}
+    {(!sessionReady || closing || switchingBranch) && <div className="session-loading" role="status">{branchOperation === 'pull' ? 'Pulling branch…' : switchingBranch ? 'Switching branch…' : closing ? 'Saving session…' : 'Restoring session…'}</div>}
+    {notice && <div className="toast" role={notice.persistent ? 'alert' : 'status'}><span>{notice.message}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice(null)}><X size={15} /></button></div>}
+    {fileOperation && <FileDialog key={JSON.stringify(fileOperation)} operation={fileOperation} root={localRoot} dirtyCount={'entry' in fileOperation ? Object.values(files).filter(file => withinEntry(file.path, fileOperation.entry.path) && file.content !== file.saved).length : 0} busy={fileBusy} error={fileError} onCancel={() => {
       if (fileBusy) return;
       setFileOperation(null);
       const returnFocus = fileOperationFocus.current;
@@ -819,11 +1042,12 @@ export default function App() {
         <p>{!native ? 'Preview only. Run real shells in the desktop app.' : !root ? 'Starts immediately in your home folder.' : 'Starts immediately in your project folder.'}</p>
       </div>
     </div>}
-    {settings && <SettingsDialog explorerPreferences={explorerPreferences} onExplorerChange={setExplorerPreferences} languageOptions={languageOptions} hasProject={!!languageWorkspace}
-      onLanguageChange={toggleLanguageSupport} onClose={() => setSettings(false)} onResetLayout={() => {
+    {settings && <SettingsDialog initialSection={settings} versionLabel={native ? `v${version}` : 'Web preview'} explorerPreferences={explorerPreferences} onExplorerChange={setExplorerPreferences} languageOptions={languageOptions} hasProject={!!languageWorkspace}
+      editorPreferences={editorPreferences} onEditorChange={setEditorPreferences}
+      onLanguageChange={toggleLanguageSupport} onClose={() => setSettings(null)} onResetLayout={() => {
         const fresh = Model.fromJson(initialLayout());
         Object.values(filesRef.current).forEach(file => fresh.doAction(Actions.addNode({ type: 'tab', id: `file:${file.path}`, component: 'file', name: file.name, config: { path: file.path } }, 'documents', DockLocation.CENTER, -1)));
-        setModel(fresh); persist(fresh); setSettings(false);
+        setModel(fresh); persist(fresh); setSettings(null);
       }} />}
   </div>;
 }

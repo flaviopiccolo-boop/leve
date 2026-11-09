@@ -8,11 +8,17 @@ const MAX_BYTES: u64 = 32 * 1024 * 1024;
 pub struct SessionStore(pub Mutex<()>);
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+enum LineEnding { Lf, Crlf, Cr }
+
+#[derive(Serialize, Deserialize)]
 pub struct RecoveryFile {
     path: String,
     name: String,
     content: String,
     saved: String,
+    #[serde(rename = "lineEnding", default, skip_serializing_if = "Option::is_none")]
+    line_ending: Option<LineEnding>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     image: bool,
 }
@@ -97,17 +103,20 @@ mod tests {
     use super::*;
 
     fn snapshot(content: &str) -> Session {
-        Session { version: 1, root: Some("C:\\project".into()), files: vec![RecoveryFile { path: "main.py".into(), name: "main.py".into(), content: content.into(), saved: "on disk".into(), image: false }], active_file: "main.py".into(), layout: serde_json::json!({}) }
+        Session { version: 1, root: Some("C:\\project".into()), files: vec![RecoveryFile { path: "main.py".into(), name: "main.py".into(), content: content.into(), saved: "on disk".into(), line_ending: None, image: false }], active_file: "main.py".into(), layout: serde_json::json!({}) }
     }
 
     #[test]
     fn preserves_unsaved_content_and_original_disk_baseline() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("recovery/session.json");
-        save(&path, &snapshot("unsaved ação")).unwrap();
+        let mut session = snapshot("unsaved ação");
+        session.files[0].line_ending = Some(LineEnding::Crlf);
+        save(&path, &session).unwrap();
         let restored = load(&path).unwrap().unwrap();
         assert_eq!(restored.files[0].content, "unsaved ação");
         assert_eq!(restored.files[0].saved, "on disk");
+        assert!(matches!(restored.files[0].line_ending, Some(LineEnding::Crlf)));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::{fs, path::{Component, Path, PathBuf}};
+use std::{fs, io::{ErrorKind, Write}, path::{Component, Path, PathBuf}};
 use tauri::State;
 use crate::{error, workspace_root, Workspace};
 
@@ -118,6 +118,42 @@ pub async fn create_entry(parent: String, name: String, directory: bool, expecte
     create(&current_root(&state, &expected_root)?, &parent, &name, directory)
 }
 
+#[derive(serde::Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub(crate) enum SaveAsResult {
+    Saved,
+    Exists { expected: String },
+}
+
+fn save_as(root: &Path, path: &str, content: &str, expected: Option<&str>) -> Result<SaveAsResult, String> {
+    if content.len() as u64 > crate::MAX_FILE_SIZE || content.contains('\0') {
+        return Err("Save As supports text files up to 4 MB.".into());
+    }
+    for part in path.split('/') { valid_name(part)?; }
+    let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let target = child(root, parent, name)?;
+    if let Some(expected) = expected {
+        crate::save_checked(&checked_path(root, path)?, content, expected)?;
+        return Ok(SaveAsResult::Saved);
+    }
+    let mut temporary = tempfile::NamedTempFile::new_in(target.parent().ok_or("Invalid folder.")?).map_err(error)?;
+    temporary.write_all(content.as_bytes()).map_err(error)?;
+    temporary.as_file().sync_all().map_err(error)?;
+    match temporary.persist_noclobber(&target) {
+        Ok(_) => Ok(SaveAsResult::Saved),
+        Err(failure) if failure.error.kind() == ErrorKind::AlreadyExists => {
+            Ok(SaveAsResult::Exists { expected: crate::text_file(&checked_path(root, path)?)? })
+        }
+        Err(failure) => Err(error(failure)),
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn save_file_as(path: String, content: String, expected: Option<String>, expected_root: String, state: State<'_, Workspace>) -> Result<SaveAsResult, String> {
+    let _operation = state.operations.lock().map_err(error)?;
+    save_as(&current_root(&state, &expected_root)?, &path, &content, expected.as_deref())
+}
+
 #[tauri::command]
 pub async fn rename_entry(path: String, name: String, expected_root: String, state: State<'_, Workspace>) -> Result<String, String> {
     let _operation = state.operations.lock().map_err(error)?;
@@ -133,6 +169,25 @@ pub async fn delete_entry(path: String, expected_root: String, state: State<'_, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_as_creates_a_copy_and_checks_for_conflicts_before_overwriting() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        create(&root, "", "src", true).unwrap();
+        fs::write(root.join("src/original.txt"), "original").unwrap();
+        let path = "src/cópia.md";
+        assert!(matches!(save_as(&root, path, "edited", None).unwrap(), SaveAsResult::Saved));
+        assert_eq!(fs::read_to_string(root.join("src/original.txt")).unwrap(), "original");
+        let SaveAsResult::Exists { expected } = save_as(&root, path, "replacement", None).unwrap() else { panic!("expected a collision"); };
+        assert_eq!(expected, "edited");
+        fs::write(root.join(path), "external edit").unwrap();
+        assert!(save_as(&root, path, "replacement", Some(&expected)).is_err());
+        assert_eq!(fs::read_to_string(root.join(path)).unwrap(), "external edit");
+        assert!(matches!(save_as(&root, path, "replacement", Some("external edit")).unwrap(), SaveAsResult::Saved));
+        assert_eq!(fs::read_to_string(root.join(path)).unwrap(), "replacement");
+        assert!(save_as(&root, "../escape.txt", "edited", None).is_err());
+    }
 
     #[test]
     fn creates_renames_and_deletes_nested_entries_without_overwriting() {

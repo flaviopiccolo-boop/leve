@@ -95,7 +95,7 @@ fn search(root: &Path, query: &str, case_sensitive: bool, cancelled: &AtomicBool
             bytes += data.len() as u64;
             if read.is_err() || data.len() as u64 > MAX_FILE || data.contains(&0) { result.skipped += 1; continue; }
             let text = match String::from_utf8(data) { Ok(text) => text, Err(_) => { result.skipped += 1; continue; } };
-            collect_matches(&relative, &text, &matcher, &mut result, cancelled)?;
+            collect_matches(&relative, text.strip_prefix('\u{feff}').unwrap_or(&text), &matcher, &mut result, cancelled)?;
             if result.limit.is_some() { return Ok(result); }
         }
     }
@@ -140,9 +140,10 @@ mod tests {
         fs::write(root.join("binary"), b"needle\0").unwrap();
         fs::write(root.join("invalid"), b"needle\xff").unwrap();
         fs::write(root.join("large"), vec![b'x'; MAX_FILE as usize + 1]).unwrap();
-        fs::write(root.join("ok"), "needle").unwrap();
+        fs::write(root.join("ok"), "\u{feff}needle").unwrap();
         let result = search(&root, "needle", false, &AtomicBool::new(false)).unwrap();
         assert_eq!(result.matches.len(), 1); assert_eq!(result.skipped, 3);
+        assert_eq!(result.matches[0].column, 1);
         assert!(search(&root, "needle", false, &AtomicBool::new(true)).is_err());
     }
 
